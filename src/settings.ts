@@ -177,31 +177,79 @@ export class PlaudSettingTab extends PluginSettingTab {
     guide.style.background = "var(--background-secondary)";
     guide.style.borderRadius = "6px";
     guide.style.marginBottom = "1em";
-    guide.style.lineHeight = "1.55";
+    guide.style.lineHeight = "1.6";
     guide.style.fontSize = "0.92em";
 
     guide.createEl("p", {
-      text: "Plaud는 구글 로그인 등 OAuth만 지원해 옵시디언에서 직접 로그인할 수 없습니다. 아래 방법으로 access_token을 직접 가져와 주세요.",
+      text:
+        "Plaud는 구글 로그인 등 OAuth만 지원해 옵시디언에서 직접 로그인할 수 없습니다. " +
+        "Plaud 웹앱에서 발급된 access_token(JWT)을 한 번만 복사해 붙여넣으면 약 300일간 사용할 수 있습니다.",
     }).style.marginTop = "0";
 
-    guide.createEl("p", { text: "Plaud 토큰 받는 법" }).style.fontWeight = "600";
+    // ───────── 방법 A: Network 탭 (권장)
+    const ha = guide.createEl("p", { text: "✅ 방법 A — Network 탭 (권장)" });
+    ha.style.fontWeight = "600";
+    ha.style.marginBottom = "0.2em";
 
-    const ol = guide.createEl("ol");
-    ol.style.paddingLeft = "1.2em";
-    ol.style.margin = "0.3em 0 0.6em 0";
-    const steps = [
-      "Plaud 웹앱(app.plaud.ai)을 평소 방법(예: 구글 로그인)으로 엽니다.",
-      "브라우저 개발자 도구를 엽니다 (Mac: Cmd+Opt+I, Windows: F12).",
-      "Network 탭으로 이동한 뒤 Plaud 웹에서 아무 작업(예: 녹음 목록 새로고침)을 합니다.",
-      "발생한 API 요청 하나를 클릭 → Headers → 'Authorization: Bearer …' 줄을 찾습니다.",
-      "'Bearer ' 다음의 긴 문자열(보통 eyJ로 시작) 전체를 복사합니다.",
-      "아래 입력란에 붙여넣고 '저장 및 검증' 버튼을 누릅니다.",
+    const olA = guide.createEl("ol");
+    olA.style.paddingLeft = "1.3em";
+    olA.style.margin = "0.2em 0 0.8em 0";
+    const stepsA = [
+      "브라우저로 https://app.plaud.ai 에 로그인 (구글 로그인 그대로 OK).",
+      "개발자 도구 열기 — Mac: ⌘+⌥+I, Windows: F12. 상단에서 Network 탭으로 이동.",
+      "Plaud 웹에서 아무 동작 (예: 녹음 목록 새로고침, 녹음 한 개 클릭). Network 패널에 요청들이 흐릅니다.",
+      "요청 중 아무거나 하나 클릭 → 우측에 Headers 탭 → Request Headers 영역에서 'Authorization: Bearer ...' 줄을 찾습니다.",
+      "'Bearer ' 다음의 매우 긴 문자열(보통 eyJ로 시작, 200자 이상) 전체를 복사. 끝부분에 공백/줄바꿈이 들어가지 않게 주의.",
+      "아래 입력란에 붙여넣고 '저장 및 검증' 버튼.",
     ];
-    for (const s of steps) ol.createEl("li", { text: s });
+    for (const s of stepsA) olA.createEl("li", { text: s });
 
-    guide.createEl("p", {
-      text: "토큰은 약 300일간 유효합니다. 만료되면 같은 방법으로 새 토큰을 받아 주세요. 입력한 토큰은 운영체제 키체인(safeStorage)으로 암호화되어 보관됩니다.",
-    }).style.fontSize = "0.88em";
+    // ───────── 방법 B: Application 탭 (대안)
+    const hb = guide.createEl("p", { text: "🔁 방법 B — Application 탭 (대안)" });
+    hb.style.fontWeight = "600";
+    hb.style.marginBottom = "0.2em";
+
+    const olB = guide.createEl("ol");
+    olB.style.paddingLeft = "1.3em";
+    olB.style.margin = "0.2em 0 0.8em 0";
+    const stepsB = [
+      "개발자 도구 → Application 탭 → 좌측 Storage → Local Storage → https://app.plaud.ai 선택.",
+      "키 목록에서 'access_token' (또는 token / accessToken 비슷한 이름)을 찾아 값을 복사.",
+      "값이 eyJ로 시작하는 긴 문자열이면 그대로 사용 가능. 아닐 경우 방법 A를 사용해 주세요.",
+    ];
+    for (const s of stepsB) olB.createEl("li", { text: s });
+
+    // ───────── 리전 안내
+    const hr = guide.createEl("p", { text: "🌍 리전(서버 위치) 안내" });
+    hr.style.fontWeight = "600";
+    hr.style.marginBottom = "0.2em";
+
+    const pr = guide.createEl("p");
+    pr.style.fontSize = "0.88em";
+    pr.style.margin = "0 0 0.5em 0";
+    pr.innerHTML =
+      "Plaud는 사용자 위치에 따라 미국(US), 유럽(EU), 일본/아시아(APNE1) 등 여러 리전에 데이터가 저장됩니다. " +
+      "본 플러그인은 토큰을 받은 뒤 자동으로 올바른 리전을 감지합니다(필요 시 한 번 자동 재시도). " +
+      "검증 시 '<b>리전: APNE1</b>'처럼 표시되면 정상입니다.";
+
+    const pr2 = guide.createEl("p");
+    pr2.style.fontSize = "0.85em";
+    pr2.style.margin = "0 0 0.6em 0";
+    pr2.style.color = "var(--text-muted)";
+    pr2.setText(
+      "⚠️ '리전을 확인할 수 없습니다' 에러가 뜨면: ① 같은 브라우저에서 한 번 더 토큰을 받아 시도, " +
+      "② VPN 사용 중이면 끄고 다시 시도, ③ 그래도 실패 시 개발자 콘솔(⌘+⌥+I)에서 '[A4P Plaud] -302 redirect' 로그를 복사해 이슈로 보고해 주세요."
+    );
+
+    // ───────── 보안 안내
+    const ps = guide.createEl("p");
+    ps.style.fontSize = "0.85em";
+    ps.style.margin = "0";
+    ps.style.color = "var(--text-muted)";
+    ps.setText(
+      "🔒 입력한 토큰은 macOS 키체인(safeStorage)으로 암호화되어 vault에 평문으로 저장되지 않습니다. " +
+      "토큰 만료(약 300일 후) 시 같은 방법으로 새 토큰을 받아 다시 입력해 주세요."
+    );
 
     new Setting(el)
       .setName("Access Token")
