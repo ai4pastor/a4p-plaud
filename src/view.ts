@@ -1,6 +1,6 @@
 import { ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type A4PPlaudPlugin from "./main";
-import { getRecordingDetail, listRecordings, PlaudApiError } from "./api";
+import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
@@ -16,6 +16,10 @@ export class PlaudListView extends ItemView {
   private loading = false;
   private listContainer: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
+  private playerContainer: HTMLElement | null = null;
+  private currentPlaudId: string | null = null;
+  private audioEl: HTMLAudioElement | null = null;
+  private playButton: HTMLButtonElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: A4PPlaudPlugin) {
     super(leaf);
@@ -38,12 +42,16 @@ export class PlaudListView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("a4p-plaud-view");
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+    root.style.height = "100%";
 
     const toolbar = root.createDiv({ cls: "a4p-plaud-toolbar" });
     toolbar.style.display = "flex";
     toolbar.style.gap = "6px";
     toolbar.style.padding = "8px";
     toolbar.style.borderBottom = "1px solid var(--background-modifier-border)";
+    toolbar.style.flex = "0 0 auto";
 
     const search = toolbar.createEl("input", { type: "text" });
     search.placeholder = "검색 (파일명/키워드)";
@@ -57,16 +65,208 @@ export class PlaudListView extends ItemView {
     refresh.title = "새로고침";
     refresh.addEventListener("click", () => this.reload());
 
+    this.playerContainer = root.createDiv({ cls: "a4p-plaud-player" });
+    this.playerContainer.style.borderBottom = "1px solid var(--background-modifier-border)";
+    this.playerContainer.style.padding = "8px";
+    this.playerContainer.style.flex = "0 0 auto";
+    this.renderPlayerEmpty();
+
     this.statusEl = root.createDiv({ cls: "a4p-plaud-status" });
     this.statusEl.style.padding = "8px";
     this.statusEl.style.fontSize = "0.85em";
     this.statusEl.style.color = "var(--text-muted)";
+    this.statusEl.style.flex = "0 0 auto";
 
     this.listContainer = root.createDiv({ cls: "a4p-plaud-list" });
-    this.listContainer.style.overflowY = "auto";
+    this.listContainer.style.overflow = "auto";
     this.listContainer.style.padding = "0 4px 8px 4px";
+    this.listContainer.style.flex = "1 1 auto";
+    this.listContainer.style.minHeight = "0";
+
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => this.refreshPlayerFromActive())
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => this.refreshPlayerFromActive())
+    );
 
     await this.reload();
+    this.refreshPlayerFromActive();
+  }
+
+  async onClose(): Promise<void> {
+    if (this.audioEl) {
+      try {
+        this.audioEl.pause();
+        this.audioEl.removeAttribute("src");
+        this.audioEl.load();
+      } catch {
+        // ignore
+      }
+    }
+    this.audioEl = null;
+    this.playButton = null;
+    this.playerContainer = null;
+    this.currentPlaudId = null;
+  }
+
+  private refreshPlayerFromActive(): void {
+    if (!this.playerContainer) return;
+    const file = this.app.workspace.getActiveFile();
+    if (!file) return;
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const id = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
+    // 일반 노트(plaud_id 없음)로 전환 시엔 플레이어를 비우지 않고 그대로 둠.
+    if (id) this.setPlayerForId(id);
+  }
+
+  private setPlayerForId(id: string | null): void {
+    if (id === this.currentPlaudId) return;
+    if (this.audioEl) {
+      try {
+        this.audioEl.pause();
+        this.audioEl.removeAttribute("src");
+        this.audioEl.load();
+      } catch {
+        // ignore
+      }
+    }
+    this.currentPlaudId = id;
+    if (!id) {
+      this.renderPlayerEmpty();
+      return;
+    }
+    this.renderPlayerReady(id);
+  }
+
+  private renderPlayerEmpty(): void {
+    const c = this.playerContainer;
+    if (!c) return;
+    c.empty();
+    const msg = c.createDiv();
+    msg.style.color = "var(--text-muted)";
+    msg.style.fontSize = "0.85em";
+    msg.setText("아래 목록에서 녹음을 선택한 뒤 ▶ 버튼을 누르세요.");
+    this.audioEl = null;
+    this.playButton = null;
+  }
+
+  private renderPlayerReady(id: string): void {
+    const c = this.playerContainer;
+    if (!c) return;
+    c.empty();
+
+    const meta = c.createDiv();
+    meta.style.fontSize = "0.9em";
+    meta.style.marginBottom = "6px";
+    meta.style.overflow = "hidden";
+    meta.style.textOverflow = "ellipsis";
+    meta.style.whiteSpace = "nowrap";
+    const rec = this.recordings.find((r) => r.id === id);
+    if (rec) {
+      meta.setText(`🎙 ${rec.filename}  ·  ${formatDuration(rec.duration)}`);
+    } else {
+      meta.setText(`🎙 ${id.slice(0, 16)}...`);
+    }
+
+    const controls = c.createDiv();
+    controls.style.display = "flex";
+    controls.style.gap = "4px";
+    controls.style.alignItems = "center";
+    controls.style.flexWrap = "wrap";
+    controls.style.marginBottom = "6px";
+
+    const playBtn = controls.createEl("button", { text: "▶ 재생" });
+    playBtn.addClass("mod-cta");
+    this.playButton = playBtn;
+    playBtn.addEventListener("click", () => void this.togglePlay(id));
+
+    const back10 = controls.createEl("button", { text: "⏪10" });
+    back10.addEventListener("click", () => {
+      if (this.audioEl) this.audioEl.currentTime = Math.max(0, this.audioEl.currentTime - 10);
+    });
+    const fwd10 = controls.createEl("button", { text: "10⏩" });
+    fwd10.addEventListener("click", () => {
+      if (this.audioEl) this.audioEl.currentTime = this.audioEl.currentTime + 10;
+    });
+
+    for (const s of [1.0, 1.5, 2.0]) {
+      const btn = controls.createEl("button", { text: `${s}x` });
+      btn.addEventListener("click", () => {
+        if (this.audioEl) this.audioEl.playbackRate = s;
+      });
+    }
+
+    const audio = c.createEl("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.style.width = "100%";
+    this.audioEl = audio;
+    audio.addEventListener("play", () => {
+      if (this.playButton) this.playButton.setText("⏸ 일시정지");
+    });
+    audio.addEventListener("pause", () => {
+      if (this.playButton) this.playButton.setText("▶ 재생");
+    });
+    audio.addEventListener("error", () => {
+      if (id === this.currentPlaudId) void this.handleAudioError(id);
+    });
+  }
+
+  private async togglePlay(id: string): Promise<void> {
+    if (!this.audioEl) return;
+    if (!this.audioEl.src) {
+      await this.loadAndPlay(id, 0);
+      return;
+    }
+    if (this.audioEl.paused) {
+      try {
+        await this.audioEl.play();
+      } catch {
+        // user gesture issue — ignore
+      }
+    } else {
+      this.audioEl.pause();
+    }
+  }
+
+  private async loadAndPlay(id: string, resumeAt: number): Promise<void> {
+    const token = this.plugin.getToken();
+    if (!token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    if (!this.audioEl) return;
+    const btn = this.playButton;
+    if (btn) btn.setText("로딩...");
+    try {
+      const url = await getMp3Url(token, id);
+      if (!url) {
+        new Notice("mp3 URL을 받지 못했습니다. (전사·요약 처리 중이거나 권한 문제일 수 있습니다)");
+        if (btn) btn.setText("▶ 재생");
+        return;
+      }
+      this.audioEl.src = url;
+      if (resumeAt > 0) {
+        const seekHandler = () => {
+          if (this.audioEl) this.audioEl.currentTime = resumeAt;
+          this.audioEl?.removeEventListener("loadedmetadata", seekHandler);
+        };
+        this.audioEl.addEventListener("loadedmetadata", seekHandler);
+      }
+      await this.audioEl.play();
+    } catch (e) {
+      new Notice(`재생 실패: ${(e as Error).message ?? "unknown"}`);
+      if (btn) btn.setText("▶ 재생");
+    }
+  }
+
+  private async handleAudioError(id: string): Promise<void> {
+    if (!this.audioEl) return;
+    const lastTime = this.audioEl.currentTime;
+    if (!this.audioEl.src) return;
+    new Notice("재생 URL이 만료된 것 같습니다. 갱신해 다시 시도합니다.");
+    await this.loadAndPlay(id, lastTime);
   }
 
   async reload(): Promise<void> {
@@ -155,7 +355,19 @@ export class PlaudListView extends ItemView {
       if (rec.is_trans) this.badge(meta, "전사");
       if (rec.is_summary) this.badge(meta, "요약");
 
-      card.addEventListener("click", () => this.openDetail(rec));
+      const infoBtn = meta.createEl("button", { text: "ⓘ" });
+      infoBtn.title = "상세·임포트";
+      infoBtn.style.marginLeft = "auto";
+      infoBtn.style.padding = "0 6px";
+      infoBtn.style.fontSize = "0.9em";
+      infoBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this.openDetail(rec);
+      });
+
+      card.addEventListener("click", () => {
+        this.setPlayerForId(rec.id);
+      });
       card.addEventListener("mouseenter", () => {
         card.style.background = "var(--background-modifier-hover)";
       });
