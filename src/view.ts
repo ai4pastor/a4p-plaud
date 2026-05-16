@@ -1,9 +1,10 @@
-import { ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type A4PPlaudPlugin from "./main";
 import { getRecordingDetail, listRecordings, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
-import { PlaudRecording } from "./types";
+import { findNoteByPlaudId, importRecording } from "./import";
+import { PlaudRecording, PlaudRecordingDetail } from "./types";
 
 export const PLAUD_VIEW_TYPE = "a4p-plaud-list-view";
 
@@ -241,6 +242,8 @@ class PlaudDetailModal extends Modal {
         `${formatStartTime(detail.start_time)} · ${formatDuration(detail.duration)} · id: ${detail.id}`
       );
 
+      this.renderActions(contentEl, detail);
+
       if (detail.summary) {
         contentEl.createEl("h4", { text: "AI 요약" });
         const sum = contentEl.createDiv();
@@ -265,6 +268,51 @@ class PlaudDetailModal extends Modal {
           ? e.message
           : "상세 정보를 가져오지 못했습니다.";
       body.setText(`오류: ${msg}`);
+    }
+  }
+
+  private renderActions(parent: HTMLElement, detail: PlaudRecordingDetail): void {
+    const bar = parent.createDiv();
+    bar.style.display = "flex";
+    bar.style.gap = "8px";
+    bar.style.marginBottom = "1em";
+
+    const existing = findNoteByPlaudId(this.app, detail.id);
+    if (existing) {
+      const openBtn = bar.createEl("button", { text: "노트 열기" });
+      openBtn.addClass("mod-cta");
+      openBtn.addEventListener("click", () => {
+        this.app.workspace.getLeaf(false).openFile(existing);
+        this.close();
+      });
+      const info = bar.createSpan({ text: `이미 임포트됨: ${existing.path}` });
+      info.style.fontSize = "0.85em";
+      info.style.color = "var(--text-muted)";
+      info.style.alignSelf = "center";
+    } else {
+      const importBtn = bar.createEl("button", { text: "노트로 가져오기" });
+      importBtn.addClass("mod-cta");
+      importBtn.addEventListener("click", async () => {
+        importBtn.setAttr("disabled", "true");
+        importBtn.setText("가져오는 중...");
+        try {
+          const token = this.plugin.getToken();
+          const region = token?.region ?? "us";
+          const { file, existed } = await importRecording(
+            this.app,
+            detail,
+            region,
+            this.plugin.settings.importFolder
+          );
+          new Notice(existed ? "이미 임포트된 녹음입니다." : `노트 생성: ${file.path}`);
+          await this.app.workspace.getLeaf(false).openFile(file);
+          this.close();
+        } catch (e) {
+          new Notice(`임포트 실패: ${(e as Error).message ?? "unknown"}`);
+          importBtn.removeAttribute("disabled");
+          importBtn.setText("노트로 가져오기");
+        }
+      });
     }
   }
 

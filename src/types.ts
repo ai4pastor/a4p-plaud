@@ -70,8 +70,10 @@ export interface PlaudRecordingDetail extends PlaudRecording {
 
 export interface PlaudSettings {
   encryptedToken: string | null;
+  importFolder: string;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
   encryptedToken: null,
+  importFolder: "Plaud",
 };

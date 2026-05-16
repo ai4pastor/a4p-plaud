@@ -40,6 +40,20 @@ export class PlaudSettingTab extends PluginSettingTab {
     } else {
       this.renderTokenForm(containerEl);
     }
+
+    containerEl.createEl("h3", { text: "임포트" });
+    new Setting(containerEl)
+      .setName("저장 폴더")
+      .setDesc("Plaud 녹음을 노트로 가져올 때 사용할 vault 폴더입니다.")
+      .addText((t) =>
+        t
+          .setPlaceholder("Plaud")
+          .setValue(this.plugin.settings.importFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.importFolder = v.trim() || "Plaud";
+            await this.plugin.persistSettings();
+          })
+      );
   }
 
   private renderLoggedIn(el: HTMLElement, user: PlaudUserInfo, region: PlaudRegion): void {

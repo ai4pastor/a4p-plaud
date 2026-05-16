@@ -137,6 +137,10 @@ export default class A4PPlaudPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  async persistSettings(): Promise<void> {
+    await this.saveSettings();
+  }
+
   private async restoreSession(): Promise<void> {
     if (!this.settings.encryptedToken || !isEncryptionAvailable()) return;
     try {
