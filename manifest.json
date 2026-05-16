@@ -1,0 +1,10 @@
+{
+  "id": "a4p-plaud",
+  "name": "Plaud (a4p)",
+  "version": "0.0.1",
+  "minAppVersion": "1.5.0",
+  "description": "Plaud 녹음·전사록을 옵시디언으로 가져오고 사이드패널에서 스트리밍 재생합니다.",
+  "author": "abadcsh",
+  "authorUrl": "https://ai4pastor.com",
+  "isDesktopOnly": true
+}
