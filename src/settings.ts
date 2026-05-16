@@ -34,7 +34,7 @@ export class PlaudSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Plaud (a4p) 설정" });
+    containerEl.createEl("h2", { text: "A4P plaud 설정" });
 
     if (!isEncryptionAvailable()) {
       const warn = containerEl.createDiv();

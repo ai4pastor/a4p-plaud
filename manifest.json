@@ -1,7 +1,7 @@
 {
   "id": "a4p-plaud",
-  "name": "Plaud (a4p)",
-  "version": "0.1.0",
+  "name": "A4P plaud",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
   "description": "Plaud 녹음·전사록을 옵시디언으로 가져오고 사이드패널에서 스트리밍 재생, 템플릿 임포트, 성경 구절 자동 wikilink 변환을 지원합니다.",
   "author": "abadcsh",
