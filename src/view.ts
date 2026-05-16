@@ -22,6 +22,8 @@ export class PlaudListView extends ItemView {
   private playButton: HTMLButtonElement | null = null;
   private plaudIdIndex: Map<string, TFile> = new Map();
   private highlightedCardEl: HTMLElement | null = null;
+  private sortOrder: "desc" | "asc" = "desc";
+  private sortBtnEl: HTMLButtonElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: A4PPlaudPlugin) {
     super(leaf);
@@ -73,11 +75,21 @@ export class PlaudListView extends ItemView {
     this.playerContainer.style.flex = "0 0 auto";
     this.renderPlayerEmpty();
 
-    this.statusEl = root.createDiv({ cls: "a4p-plaud-status" });
-    this.statusEl.style.padding = "8px";
-    this.statusEl.style.fontSize = "0.85em";
-    this.statusEl.style.color = "var(--text-muted)";
-    this.statusEl.style.flex = "0 0 auto";
+    const statusBar = root.createDiv({ cls: "a4p-plaud-status-bar" });
+    this.statusEl = statusBar.createDiv({ cls: "a4p-plaud-status-text" });
+
+    const sortBtn = statusBar.createEl("button", {
+      cls: "a4p-plaud-sort-btn",
+      text: this.sortLabel(),
+    });
+    sortBtn.title = "정렬 순서 토글";
+    sortBtn.addEventListener("click", () => {
+      this.sortOrder = this.sortOrder === "desc" ? "asc" : "desc";
+      sortBtn.setText(this.sortLabel());
+      this.applySort();
+      this.applyFilter();
+    });
+    this.sortBtnEl = sortBtn;
 
     this.listContainer = root.createDiv({ cls: "a4p-plaud-list" });
     this.listContainer.style.overflow = "auto";
@@ -304,6 +316,15 @@ export class PlaudListView extends ItemView {
     await this.loadAndPlay(id, lastTime);
   }
 
+  private sortLabel(): string {
+    return this.sortOrder === "desc" ? "↓ 최신순" : "↑ 오래된순";
+  }
+
+  private applySort(): void {
+    const dir = this.sortOrder === "desc" ? -1 : 1;
+    this.recordings.sort((a, b) => dir * (b.start_time - a.start_time));
+  }
+
   async reload(): Promise<void> {
     if (this.loading) return;
     const token = this.plugin.getToken();
@@ -317,10 +338,9 @@ export class PlaudListView extends ItemView {
     this.setStatus("녹음 목록 불러오는 중...");
     try {
       const list = await listRecordings(token);
-      list.sort((a, b) => b.start_time - a.start_time);
       this.recordings = list;
+      this.applySort();
       this.rebuildPlaudIdIndex();
-      this.setStatus(`총 ${list.length}개`);
       this.applyFilter();
     } catch (e) {
       const msg =
@@ -360,7 +380,17 @@ export class PlaudListView extends ItemView {
         return false;
       });
     }
+    this.refreshStatus();
     this.renderList();
+  }
+
+  private refreshStatus(): void {
+    const total = this.recordings.length;
+    if (this.query) {
+      this.setStatus(`필터: ${this.filtered.length} / ${total}개`);
+    } else {
+      this.setStatus(`총 ${total}개`);
+    }
   }
 
   private renderList(): void {
@@ -383,6 +413,13 @@ export class PlaudListView extends ItemView {
       card.createDiv({ cls: "a4p-plaud-card-date", text: formatStartTime(rec.start_time) });
       card.createDiv({ cls: "a4p-plaud-card-name", text: rec.filename });
 
+      if (rec.keywords && rec.keywords.length > 0) {
+        const kws = card.createDiv({ cls: "a4p-plaud-card-keywords" });
+        for (const kw of rec.keywords.slice(0, 5)) {
+          kws.createSpan({ cls: "a4p-plaud-keyword", text: kw });
+        }
+      }
+
       const meta = card.createDiv({ cls: "a4p-plaud-card-meta" });
       meta.createSpan({ cls: "a4p-plaud-card-duration", text: formatDuration(rec.duration) });
 
@@ -392,15 +429,16 @@ export class PlaudListView extends ItemView {
       const existingFile = this.plaudIdIndex.get(rec.id);
       const actionBtn = meta.createEl("button", { cls: "a4p-plaud-card-action" });
       if (existingFile) {
-        actionBtn.setText("📄 노트 열기");
+        card.addClass("a4p-plaud-card-imported");
         actionBtn.addClass("mod-cta");
+        actionBtn.setText("📄 노트 열기");
         actionBtn.title = existingFile.path;
         actionBtn.addEventListener("click", (ev) => {
           ev.stopPropagation();
           this.app.workspace.getLeaf(false).openFile(existingFile);
         });
       } else {
-        actionBtn.setText("ⓘ 상세");
+        actionBtn.setText("📄 노트 보기");
         actionBtn.title = "트랜스크립트 미리보기 / 노트로 가져오기";
         actionBtn.addEventListener("click", (ev) => {
           ev.stopPropagation();

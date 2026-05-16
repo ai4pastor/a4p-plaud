@@ -82,9 +82,65 @@
 
 .a4p-plaud-card-action {
   margin-left: auto;
-  padding: 4px 11px;
+  padding: 6px 14px;
+  font-size: 0.88em;
+  font-weight: 600;
+  border-radius: 6px;
+}
+
+/* 미임포트 카드의 버튼: 옅은 outline */
+.a4p-plaud-card:not(.a4p-plaud-card-imported) .a4p-plaud-card-action:not(.mod-cta) {
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.a4p-plaud-card:not(.a4p-plaud-card-imported) .a4p-plaud-card-action:not(.mod-cta):hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--text-muted);
+}
+
+/* 임포트된 카드 — 좌측 그린 보더로 식별 */
+.a4p-plaud-card-imported {
+  border-left: 3px solid color-mix(in srgb, var(--color-green) 70%, var(--background-modifier-border));
+}
+
+.a4p-plaud-card-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 2px 0;
+}
+
+.a4p-plaud-keyword {
+  font-size: 0.72em;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-muted);
+}
+
+.a4p-plaud-status-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 0.82em;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.a4p-plaud-status-text {
+  flex: 1;
+}
+
+.a4p-plaud-sort-btn {
+  padding: 2px 8px;
   font-size: 0.85em;
-  border-radius: 5px;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
 /* 활성 노트 카드 강조 — hover보다 우선 */
