@@ -1,8 +1,9 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { isTokenExpired, parseAndValidateToken } from "./auth";
 import { getMp3Url, getRecordingDetail, getUserInfo, listRecordings } from "./api";
 import { PLAUD_VIEW_TYPE, PlaudListView } from "./view";
+import { convertBibleRefsInNote } from "./bible";
 import { decryptFromBase64, encryptToBase64, isEncryptionAvailable } from "./storage";
 import {
   DEFAULT_SETTINGS,
@@ -41,7 +42,42 @@ export default class A4PPlaudPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    this.addCommand({
+      id: "plaud-bible-wikilink",
+      name: "활성 노트의 성경 구절을 wikilink로 변환",
+      callback: () => void this.convertActiveBibleRefs(),
+    });
+
     this.registerDebugCommands();
+  }
+
+  private async convertActiveBibleRefs(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || !(file instanceof TFile)) {
+      new Notice("활성 노트가 없습니다.");
+      return;
+    }
+    if (file.extension !== "md") {
+      new Notice("마크다운 노트에서만 사용 가능합니다.");
+      return;
+    }
+    try {
+      const original = await this.app.vault.read(file);
+      const { text, count } = convertBibleRefsInNote(original);
+      if (count === 0) {
+        new Notice("변환할 성경 구절을 찾지 못했습니다.");
+        return;
+      }
+      if (text === original) {
+        new Notice("변경할 내용이 없습니다.");
+        return;
+      }
+      await this.app.vault.modify(file, text);
+      new Notice(`성경 구절 ${count}개를 wikilink로 변환했습니다.`);
+    } catch (e) {
+      console.error("[A4P Plaud] 성경 wikilink 변환 실패", e);
+      new Notice(`변환 실패: ${(e as Error).message ?? "unknown"}`);
+    }
   }
 
   async onunload(): Promise<void> {

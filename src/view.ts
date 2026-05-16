@@ -321,8 +321,11 @@ export class PlaudListView extends ItemView {
   }
 
   private applySort(): void {
-    const dir = this.sortOrder === "desc" ? -1 : 1;
-    this.recordings.sort((a, b) => dir * (b.start_time - a.start_time));
+    if (this.sortOrder === "desc") {
+      this.recordings.sort((a, b) => b.start_time - a.start_time);
+    } else {
+      this.recordings.sort((a, b) => a.start_time - b.start_time);
+    }
   }
 
   async reload(): Promise<void> {
