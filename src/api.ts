@@ -1,5 +1,7 @@
 import { requestUrl } from "obsidian";
 import {
+  PlaudRecording,
+  PlaudRecordingDetail,
   PlaudRegion,
   PlaudTokenData,
   PlaudUserInfo,
@@ -119,4 +121,96 @@ export async function getUserInfo(
     },
     region: regionUsed,
   };
+}
+
+function normalizeRecording(raw: Record<string, unknown>): PlaudRecording | null {
+  const id = (raw.file_id ?? raw.id) as string | undefined;
+  if (!id) return null;
+  return {
+    id,
+    filename: String(raw.file_name ?? raw.filename ?? id),
+    fullname: raw.fullname as string | undefined,
+    filesize: Number(raw.file_size ?? raw.filesize ?? 0),
+    duration: Number(raw.duration ?? 0),
+    start_time: Number(raw.start_time ?? 0),
+    end_time: Number(raw.end_time ?? 0),
+    is_trash: Boolean(raw.is_trash),
+    is_trans: Boolean(raw.is_trans),
+    is_summary: Boolean(raw.is_summary),
+    keywords: Array.isArray(raw.keywords) ? (raw.keywords as string[]) : undefined,
+    serial_number: raw.serial_number as string | undefined,
+  };
+}
+
+export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecording[]> {
+  const { data } = await plaudRequest("/file/simple/web", token);
+  const rawList =
+    (data.data_file_list as Record<string, unknown>[] | undefined) ??
+    (data.data as Record<string, unknown>[] | undefined) ??
+    [];
+  const recordings: PlaudRecording[] = [];
+  for (const raw of rawList) {
+    const rec = normalizeRecording(raw);
+    if (rec && !rec.is_trash) recordings.push(rec);
+  }
+  return recordings;
+}
+
+export async function getRecordingDetail(
+  token: PlaudTokenData,
+  id: string
+): Promise<PlaudRecordingDetail> {
+  const { data } = await plaudRequest(`/file/detail/${encodeURIComponent(id)}`, token);
+  const raw = ((data.data as Record<string, unknown> | undefined) ?? data) as Record<string, unknown>;
+  const base = normalizeRecording(raw) ?? {
+    id,
+    filename: id,
+    filesize: 0,
+    duration: 0,
+    start_time: 0,
+    end_time: 0,
+    is_trash: false,
+    is_trans: false,
+    is_summary: false,
+  };
+
+  let transcript = "";
+  const preDownload = raw.pre_download_content_list as
+    | Array<{ data_content?: string }>
+    | undefined;
+  if (Array.isArray(preDownload)) {
+    for (const item of preDownload) {
+      const content = item?.data_content ?? "";
+      if (typeof content === "string" && content.length > transcript.length) {
+        transcript = content;
+      }
+    }
+  }
+
+  const summary =
+    (raw.summary as string | undefined) ??
+    (raw.ai_summary as string | undefined) ??
+    undefined;
+
+  return { ...base, transcript, summary };
+}
+
+export async function getMp3Url(
+  token: PlaudTokenData,
+  id: string
+): Promise<string | null> {
+  try {
+    const { data } = await plaudRequest(
+      `/file/temp-url/${encodeURIComponent(id)}?is_opus=false`,
+      token
+    );
+    const candidate =
+      (data.url as string | undefined) ??
+      ((data.data as Record<string, unknown> | undefined)?.url as string | undefined) ??
+      (typeof data.data === "string" ? (data.data as string) : undefined) ??
+      (data.temp_url as string | undefined);
+    return candidate ?? null;
+  } catch {
+    return null;
+  }
 }

@@ -48,6 +48,26 @@ export interface PlaudUserInfo {
   membership_type: string;
 }
 
+export interface PlaudRecording {
+  id: string;
+  filename: string;
+  fullname?: string;
+  filesize: number;
+  duration: number;
+  start_time: number;
+  end_time: number;
+  is_trash: boolean;
+  is_trans: boolean;
+  is_summary: boolean;
+  keywords?: string[];
+  serial_number?: string;
+}
+
+export interface PlaudRecordingDetail extends PlaudRecording {
+  transcript: string;
+  summary?: string;
+}
+
 export interface PlaudSettings {
   encryptedToken: string | null;
 }
