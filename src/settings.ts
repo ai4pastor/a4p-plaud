@@ -1,9 +1,25 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, FuzzySuggestModal, Notice, PluginSettingTab, Setting, TFile } from "obsidian";
 import type A4PPlaudPlugin from "./main";
 import { PlaudAuthError } from "./auth";
 import { PlaudApiError } from "./api";
 import { isEncryptionAvailable } from "./storage";
 import { PlaudRegion, PlaudUserInfo } from "./types";
+
+class MarkdownFileSuggester extends FuzzySuggestModal<TFile> {
+  constructor(app: App, private onPick: (file: TFile) => void) {
+    super(app);
+    this.setPlaceholder("템플릿 .md 파일 검색");
+  }
+  getItems(): TFile[] {
+    return this.app.vault.getMarkdownFiles();
+  }
+  getItemText(f: TFile): string {
+    return f.path;
+  }
+  onChooseItem(f: TFile): void {
+    this.onPick(f);
+  }
+}
 
 export class PlaudSettingTab extends PluginSettingTab {
   plugin: A4PPlaudPlugin;
@@ -54,6 +70,44 @@ export class PlaudSettingTab extends PluginSettingTab {
             await this.plugin.persistSettings();
           })
       );
+
+    const tplSetting = new Setting(containerEl)
+      .setName("기본 임포트 템플릿")
+      .setDesc(
+        "vault 내 .md 파일 경로. 비워두면 내장 형식을 사용합니다. " +
+          "지원 변수: {{plaud_id}} {{transcript}} {{summary}} {{filename}} {{date}} {{duration}} {{duration_seconds}} {{region}} {{imported_at}}. " +
+          "Templater가 설치돼 있으면 <% ... %> 문법도 노트 생성 직후 자동 처리됩니다."
+      );
+    let tplTextRef: { setValue: (v: string) => void } | null = null;
+    tplSetting.addText((t) => {
+      tplTextRef = t as unknown as { setValue: (v: string) => void };
+      t.setPlaceholder("templates/plaud-recording.md")
+        .setValue(this.plugin.settings.templatePath)
+        .onChange(async (v) => {
+          this.plugin.settings.templatePath = v.trim();
+          await this.plugin.persistSettings();
+        });
+    });
+    tplSetting.addButton((b) =>
+      b
+        .setButtonText("📁 찾기")
+        .onClick(() => {
+          new MarkdownFileSuggester(this.app, async (f) => {
+            this.plugin.settings.templatePath = f.path;
+            await this.plugin.persistSettings();
+            tplTextRef?.setValue(f.path);
+          }).open();
+        })
+    );
+    tplSetting.addButton((b) =>
+      b
+        .setButtonText("비우기")
+        .onClick(async () => {
+          this.plugin.settings.templatePath = "";
+          await this.plugin.persistSettings();
+          tplTextRef?.setValue("");
+        })
+    );
   }
 
   private renderLoggedIn(el: HTMLElement, user: PlaudUserInfo, region: PlaudRegion): void {

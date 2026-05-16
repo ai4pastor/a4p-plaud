@@ -71,9 +71,12 @@ export interface PlaudRecordingDetail extends PlaudRecording {
 export interface PlaudSettings {
   encryptedToken: string | null;
   importFolder: string;
+  /** 기본 임포트 템플릿 (.md 파일의 vault 내 경로). 빈 문자열이면 내장 형식 사용. */
+  templatePath: string;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
   encryptedToken: null,
   importFolder: "Plaud",
+  templatePath: "",
 };

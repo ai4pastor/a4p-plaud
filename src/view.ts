@@ -1,4 +1,4 @@
-import { ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { App, FuzzySuggestModal, ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type A4PPlaudPlugin from "./main";
 import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
@@ -20,6 +20,8 @@ export class PlaudListView extends ItemView {
   private currentPlaudId: string | null = null;
   private audioEl: HTMLAudioElement | null = null;
   private playButton: HTMLButtonElement | null = null;
+  private plaudIdIndex: Map<string, TFile> = new Map();
+  private highlightedCardEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: A4PPlaudPlugin) {
     super(leaf);
@@ -84,14 +86,16 @@ export class PlaudListView extends ItemView {
     this.listContainer.style.minHeight = "0";
 
     this.registerEvent(
-      this.app.workspace.on("active-leaf-change", () => this.refreshPlayerFromActive())
+      this.app.workspace.on("active-leaf-change", () =>
+        this.refreshPlayerFromFile(this.app.workspace.getActiveFile())
+      )
     );
     this.registerEvent(
-      this.app.workspace.on("file-open", () => this.refreshPlayerFromActive())
+      this.app.workspace.on("file-open", (file) => this.refreshPlayerFromFile(file))
     );
 
     await this.reload();
-    this.refreshPlayerFromActive();
+    this.refreshPlayerFromFile(this.app.workspace.getActiveFile());
   }
 
   async onClose(): Promise<void> {
@@ -110,18 +114,47 @@ export class PlaudListView extends ItemView {
     this.currentPlaudId = null;
   }
 
-  private refreshPlayerFromActive(): void {
+  private refreshPlayerFromFile(file: TFile | null): void {
     if (!this.playerContainer) return;
-    const file = this.app.workspace.getActiveFile();
     if (!file) return;
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const id = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
+    console.log("[A4P Plaud] refreshPlayerFromFile", { path: file.path, id });
     // 일반 노트(plaud_id 없음)로 전환 시엔 플레이어를 비우지 않고 그대로 둠.
-    if (id) this.setPlayerForId(id);
+    if (id) {
+      this.setPlayerForId(id);
+    }
+  }
+
+  private highlightCardForId(id: string | null, scroll: boolean): void {
+    const c = this.listContainer;
+    if (!c) return;
+    if (this.highlightedCardEl) {
+      this.highlightedCardEl.removeClass("a4p-plaud-card-active");
+      this.highlightedCardEl = null;
+    }
+    if (!id) return;
+    const sel = `.a4p-plaud-card[data-plaud-id="${CSS.escape(id)}"]`;
+    const el = c.querySelector(sel) as HTMLElement | null;
+    console.log("[A4P Plaud] highlightCardForId", { id, found: !!el });
+    if (!el) return;
+    // 펄스 애니메이션 재시작을 위해 class를 강제로 제거 후 다시 추가
+    el.removeClass("a4p-plaud-card-active");
+    // reflow 강제
+    void el.offsetWidth;
+    el.addClass("a4p-plaud-card-active");
+    this.highlightedCardEl = el;
+    if (scroll) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   }
 
   private setPlayerForId(id: string | null): void {
-    if (id === this.currentPlaudId) return;
+    if (id === this.currentPlaudId) {
+      // 같은 id라도 하이라이트는 재트리거 (펄스 다시)
+      if (id) this.highlightCardForId(id, true);
+      return;
+    }
     if (this.audioEl) {
       try {
         this.audioEl.pause();
@@ -134,9 +167,11 @@ export class PlaudListView extends ItemView {
     this.currentPlaudId = id;
     if (!id) {
       this.renderPlayerEmpty();
+      this.highlightCardForId(null, false);
       return;
     }
     this.renderPlayerReady(id);
+    this.highlightCardForId(id, true);
   }
 
   private renderPlayerEmpty(): void {
@@ -284,6 +319,7 @@ export class PlaudListView extends ItemView {
       const list = await listRecordings(token);
       list.sort((a, b) => b.start_time - a.start_time);
       this.recordings = list;
+      this.rebuildPlaudIdIndex();
       this.setStatus(`총 ${list.length}개`);
       this.applyFilter();
     } catch (e) {
@@ -295,6 +331,22 @@ export class PlaudListView extends ItemView {
     } finally {
       this.loading = false;
     }
+  }
+
+  private rebuildPlaudIdIndex(): void {
+    const map = new Map<string, TFile>();
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const cache = this.app.metadataCache.getFileCache(f);
+      const id = cache?.frontmatter?.plaud_id;
+      if (typeof id === "string" && id) map.set(id, f);
+    }
+    this.plaudIdIndex = map;
+  }
+
+  /** 모달에서 임포트 성공 시 사이드패널이 즉시 반영하도록 호출. */
+  notifyImported(plaudId: string, file: TFile): void {
+    this.plaudIdIndex.set(plaudId, file);
+    this.renderList();
   }
 
   private applyFilter(): void {
@@ -326,63 +378,53 @@ export class PlaudListView extends ItemView {
 
     for (const rec of this.filtered) {
       const card = c.createDiv({ cls: "a4p-plaud-card" });
-      card.style.padding = "8px 10px";
-      card.style.margin = "6px 0";
-      card.style.borderRadius = "6px";
-      card.style.background = "var(--background-secondary)";
-      card.style.cursor = "pointer";
+      card.dataset.plaudId = rec.id;
 
-      const date = card.createDiv({ text: formatStartTime(rec.start_time) });
-      date.style.fontSize = "0.85em";
-      date.style.color = "var(--text-muted)";
+      card.createDiv({ cls: "a4p-plaud-card-date", text: formatStartTime(rec.start_time) });
+      card.createDiv({ cls: "a4p-plaud-card-name", text: rec.filename });
 
-      const name = card.createDiv({ text: rec.filename });
-      name.style.fontWeight = "500";
-      name.style.margin = "2px 0";
-      name.style.overflow = "hidden";
-      name.style.textOverflow = "ellipsis";
-      name.style.whiteSpace = "nowrap";
+      const meta = card.createDiv({ cls: "a4p-plaud-card-meta" });
+      meta.createSpan({ cls: "a4p-plaud-card-duration", text: formatDuration(rec.duration) });
 
-      const meta = card.createDiv();
-      meta.style.display = "flex";
-      meta.style.gap = "6px";
-      meta.style.alignItems = "center";
-      meta.style.fontSize = "0.8em";
+      if (rec.is_trans) this.badge(meta, "전사", "trans");
+      if (rec.is_summary) this.badge(meta, "요약", "summary");
 
-      const dur = meta.createSpan({ text: formatDuration(rec.duration) });
-      dur.style.color = "var(--text-muted)";
-
-      if (rec.is_trans) this.badge(meta, "전사");
-      if (rec.is_summary) this.badge(meta, "요약");
-
-      const infoBtn = meta.createEl("button", { text: "ⓘ" });
-      infoBtn.title = "상세·임포트";
-      infoBtn.style.marginLeft = "auto";
-      infoBtn.style.padding = "0 6px";
-      infoBtn.style.fontSize = "0.9em";
-      infoBtn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        this.openDetail(rec);
-      });
+      const existingFile = this.plaudIdIndex.get(rec.id);
+      const actionBtn = meta.createEl("button", { cls: "a4p-plaud-card-action" });
+      if (existingFile) {
+        actionBtn.setText("📄 노트 열기");
+        actionBtn.addClass("mod-cta");
+        actionBtn.title = existingFile.path;
+        actionBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          this.app.workspace.getLeaf(false).openFile(existingFile);
+        });
+      } else {
+        actionBtn.setText("ⓘ 상세");
+        actionBtn.title = "트랜스크립트 미리보기 / 노트로 가져오기";
+        actionBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          this.openDetail(rec);
+        });
+      }
 
       card.addEventListener("click", () => {
         this.setPlayerForId(rec.id);
       });
-      card.addEventListener("mouseenter", () => {
-        card.style.background = "var(--background-modifier-hover)";
-      });
-      card.addEventListener("mouseleave", () => {
-        card.style.background = "var(--background-secondary)";
-      });
     }
+    // 카드 재렌더 후 활성 노트 하이라이트 복원 (스크롤 없음)
+    this.highlightedCardEl = null;
+    const af = this.app.workspace.getActiveFile();
+    const fm = af ? this.app.metadataCache.getFileCache(af)?.frontmatter : null;
+    const id = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
+    if (id) this.highlightCardForId(id, false);
   }
 
-  private badge(parent: HTMLElement, text: string): void {
-    const b = parent.createSpan({ text });
-    b.style.padding = "1px 6px";
-    b.style.borderRadius = "10px";
-    b.style.background = "var(--background-modifier-border)";
-    b.style.fontSize = "0.75em";
+  private badge(parent: HTMLElement, text: string, kind: "trans" | "summary"): void {
+    parent.createSpan({
+      text,
+      cls: `a4p-plaud-badge a4p-plaud-badge-${kind}`,
+    });
   }
 
   private setStatus(text: string): void {
@@ -395,18 +437,25 @@ export class PlaudListView extends ItemView {
       new Notice("로그인되지 않았습니다.");
       return;
     }
-    new PlaudDetailModal(this.app, this.plugin, rec).open();
+    new PlaudDetailModal(this.app, this.plugin, rec, this).open();
   }
 }
 
 class PlaudDetailModal extends Modal {
   plugin: A4PPlaudPlugin;
   recording: PlaudRecording;
+  parentView: PlaudListView | null;
 
-  constructor(app: PlaudListView["app"], plugin: A4PPlaudPlugin, recording: PlaudRecording) {
+  constructor(
+    app: PlaudListView["app"],
+    plugin: A4PPlaudPlugin,
+    recording: PlaudRecording,
+    parentView: PlaudListView | null = null
+  ) {
     super(app);
     this.plugin = plugin;
     this.recording = recording;
+    this.parentView = parentView;
   }
 
   async onOpen(): Promise<void> {
@@ -487,7 +536,7 @@ class PlaudDetailModal extends Modal {
     const bar = parent.createDiv();
     bar.style.display = "flex";
     bar.style.gap = "8px";
-    bar.style.marginBottom = "1em";
+    bar.style.marginBottom = "0.5em";
 
     const existing = findNoteByPlaudId(this.app, detail.id);
     if (existing) {
@@ -501,34 +550,84 @@ class PlaudDetailModal extends Modal {
       info.style.fontSize = "0.85em";
       info.style.color = "var(--text-muted)";
       info.style.alignSelf = "center";
-    } else {
-      const importBtn = bar.createEl("button", { text: "노트로 가져오기" });
-      importBtn.addClass("mod-cta");
-      importBtn.addEventListener("click", async () => {
-        importBtn.setAttr("disabled", "true");
-        importBtn.setText("가져오는 중...");
-        try {
-          const token = this.plugin.getToken();
-          const region = token?.region ?? "us";
-          const { file, existed } = await importRecording(
-            this.app,
-            detail,
-            region,
-            this.plugin.settings.importFolder
-          );
-          new Notice(existed ? "이미 임포트된 녹음입니다." : `노트 생성: ${file.path}`);
-          await this.app.workspace.getLeaf(false).openFile(file);
-          this.close();
-        } catch (e) {
-          new Notice(`임포트 실패: ${(e as Error).message ?? "unknown"}`);
-          importBtn.removeAttribute("disabled");
-          importBtn.setText("노트로 가져오기");
-        }
-      });
+      return;
     }
+
+    const importBtn = bar.createEl("button", { text: "노트로 가져오기" });
+    importBtn.addClass("mod-cta");
+
+    const tplRow = parent.createDiv();
+    tplRow.style.display = "flex";
+    tplRow.style.gap = "6px";
+    tplRow.style.alignItems = "center";
+    tplRow.style.marginBottom = "1em";
+    tplRow.style.fontSize = "0.88em";
+
+    const label = tplRow.createSpan({ text: "템플릿:" });
+    label.style.color = "var(--text-muted)";
+
+    const tplInput = tplRow.createEl("input", { type: "text" });
+    tplInput.style.flex = "1";
+    tplInput.placeholder = "비우면 내장 형식";
+    tplInput.value = this.plugin.settings.templatePath;
+
+    const browseBtn = tplRow.createEl("button", { text: "📁" });
+    browseBtn.title = "vault에서 템플릿 선택";
+    browseBtn.addEventListener("click", () => {
+      new ModalMarkdownFileSuggester(this.app, (f) => {
+        tplInput.value = f.path;
+      }).open();
+    });
+
+    const clearBtn = tplRow.createEl("button", { text: "✕" });
+    clearBtn.title = "템플릿 비우기 (내장 형식 사용)";
+    clearBtn.addEventListener("click", () => {
+      tplInput.value = "";
+    });
+
+    importBtn.addEventListener("click", async () => {
+      importBtn.setAttr("disabled", "true");
+      importBtn.setText("가져오는 중...");
+      try {
+        const token = this.plugin.getToken();
+        const region = token?.region ?? "us";
+        const tplPath = tplInput.value.trim();
+        const { file, existed } = await importRecording(
+          this.app,
+          detail,
+          region,
+          this.plugin.settings.importFolder,
+          { templatePath: tplPath || undefined }
+        );
+        new Notice(existed ? "이미 임포트된 녹음입니다." : `노트 생성: ${file.path}`);
+        this.parentView?.notifyImported(detail.id, file);
+        await this.app.workspace.getLeaf(false).openFile(file);
+        this.close();
+      } catch (e) {
+        new Notice(`임포트 실패: ${(e as Error).message ?? "unknown"}`);
+        importBtn.removeAttribute("disabled");
+        importBtn.setText("노트로 가져오기");
+      }
+    });
   }
 
   onClose(): void {
     this.contentEl.empty();
+  }
+}
+
+class ModalMarkdownFileSuggester extends FuzzySuggestModal<TFile> {
+  constructor(app: App, private onPick: (file: TFile) => void) {
+    super(app);
+    this.setPlaceholder("템플릿 .md 파일 검색");
+  }
+  getItems(): TFile[] {
+    return this.app.vault.getMarkdownFiles();
+  }
+  getItemText(f: TFile): string {
+    return f.path;
+  }
+  onChooseItem(f: TFile): void {
+    this.onPick(f);
   }
 }

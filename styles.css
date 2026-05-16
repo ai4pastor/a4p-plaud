@@ -1,0 +1,147 @@
+/* A4P Plaud — 사이드패널 카드 */
+
+.a4p-plaud-list {
+  padding: 4px 6px 12px 6px;
+}
+
+.a4p-plaud-card {
+  position: relative;
+  display: block;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  transition:
+    transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.a4p-plaud-card:hover {
+  background: var(--background-modifier-hover);
+  border-color: color-mix(in srgb, var(--interactive-accent) 38%, var(--background-modifier-border));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--color-base-00) 28%, transparent);
+}
+
+.a4p-plaud-card-date {
+  font-size: 0.78em;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--interactive-accent) 65%, var(--text-muted));
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
+}
+
+.a4p-plaud-card-name {
+  font-weight: 600;
+  font-size: 0.97em;
+  color: var(--text-normal);
+  margin: 2px 0 8px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.a4p-plaud-card-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.8em;
+}
+
+.a4p-plaud-card-duration {
+  font-family: var(--font-monospace);
+  font-size: 0.92em;
+  color: var(--text-normal);
+  background: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+
+.a4p-plaud-badge {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.a4p-plaud-badge-trans {
+  background: color-mix(in srgb, var(--color-green) 22%, transparent);
+  color: var(--color-green);
+}
+
+.a4p-plaud-badge-summary {
+  background: color-mix(in srgb, var(--color-blue) 22%, transparent);
+  color: var(--color-blue);
+}
+
+.a4p-plaud-card-action {
+  margin-left: auto;
+  padding: 4px 11px;
+  font-size: 0.85em;
+  border-radius: 5px;
+}
+
+/* 활성 노트 카드 강조 — hover보다 우선 */
+
+.a4p-plaud-card-active,
+.a4p-plaud-card-active:hover {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--interactive-accent) 24%, transparent),
+    var(--background-secondary) 75%
+  ) !important;
+  border-color: var(--interactive-accent) !important;
+  box-shadow:
+    inset 4px 0 0 var(--interactive-accent),
+    0 0 0 1px color-mix(in srgb, var(--interactive-accent) 45%, transparent),
+    0 6px 16px color-mix(in srgb, var(--interactive-accent) 22%, transparent) !important;
+  transform: translateX(2px) !important;
+  animation: a4p-plaud-pulse 1.6s ease-out;
+}
+
+@keyframes a4p-plaud-pulse {
+  0% {
+    box-shadow:
+      inset 4px 0 0 var(--interactive-accent),
+      0 0 0 2px var(--interactive-accent),
+      0 0 32px color-mix(in srgb, var(--interactive-accent) 65%, transparent);
+    transform: scale(1.035) translateX(2px);
+  }
+  45% {
+    box-shadow:
+      inset 4px 0 0 var(--interactive-accent),
+      0 0 0 1px var(--interactive-accent),
+      0 0 22px color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+    transform: scale(1.012) translateX(2px);
+  }
+  100% {
+    box-shadow:
+      inset 4px 0 0 var(--interactive-accent),
+      0 0 0 1px color-mix(in srgb, var(--interactive-accent) 45%, transparent),
+      0 6px 16px color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+    transform: scale(1) translateX(2px);
+  }
+}
+
+.a4p-plaud-card-active::before {
+  content: "●";
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  color: var(--interactive-accent);
+  font-size: 0.7em;
+  opacity: 0;
+  animation: a4p-plaud-dot 1.6s ease-out forwards;
+}
+
+@keyframes a4p-plaud-dot {
+  0% { opacity: 0; transform: scale(0.5); }
+  20% { opacity: 1; transform: scale(1.2); }
+  100% { opacity: 0.85; transform: scale(1); }
+}
