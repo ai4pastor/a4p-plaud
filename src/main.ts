@@ -1,7 +1,8 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { isTokenExpired, parseAndValidateToken } from "./auth";
 import { getMp3Url, getRecordingDetail, getUserInfo, listRecordings } from "./api";
+import { PLAUD_VIEW_TYPE, PlaudListView } from "./view";
 import { decryptFromBase64, encryptToBase64, isEncryptionAvailable } from "./storage";
 import {
   DEFAULT_SETTINGS,
@@ -27,7 +28,34 @@ export default class A4PPlaudPlugin extends Plugin {
     await this.loadSettings();
     await this.restoreSession();
     this.addSettingTab(new PlaudSettingTab(this.app, this));
+
+    this.registerView(PLAUD_VIEW_TYPE, (leaf) => new PlaudListView(leaf, this));
+
+    this.addRibbonIcon("microphone", "Plaud 패널 열기", () => {
+      this.activateView();
+    });
+
+    this.addCommand({
+      id: "plaud-open-view",
+      name: "Plaud 패널 열기",
+      callback: () => this.activateView(),
+    });
+
     this.registerDebugCommands();
+  }
+
+  async onunload(): Promise<void> {
+    console.log("A4P Plaud unloaded");
+  }
+
+  private async activateView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(PLAUD_VIEW_TYPE)[0] ?? null;
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false);
+      if (leaf) await leaf.setViewState({ type: PLAUD_VIEW_TYPE, active: true });
+    }
+    if (leaf) workspace.revealLeaf(leaf);
   }
 
   private registerDebugCommands(): void {
@@ -99,10 +127,6 @@ export default class A4PPlaudPlugin extends Plugin {
         }
       },
     });
-  }
-
-  async onunload(): Promise<void> {
-    console.log("A4P Plaud unloaded");
   }
 
   private async loadSettings(): Promise<void> {
