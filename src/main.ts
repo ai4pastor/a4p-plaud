@@ -1,7 +1,7 @@
 import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { isTokenExpired, parseAndValidateToken } from "./auth";
-import { getMp3Url, getRecordingDetail, getUserInfo, listRecordings } from "./api";
+import { getUserInfo } from "./api";
 import { PLAUD_VIEW_TYPE, PlaudListView } from "./view";
 import { convertBibleRefsInNote } from "./bible";
 import { decryptFromBase64, encryptToBase64, isEncryptionAvailable } from "./storage";
@@ -47,8 +47,6 @@ export default class A4PPlaudPlugin extends Plugin {
       name: "활성 노트의 성경 구절을 wikilink로 변환",
       callback: () => void this.convertActiveBibleRefs(),
     });
-
-    this.registerDebugCommands();
   }
 
   private async convertActiveBibleRefs(): Promise<void> {
@@ -92,77 +90,6 @@ export default class A4PPlaudPlugin extends Plugin {
       if (leaf) await leaf.setViewState({ type: PLAUD_VIEW_TYPE, active: true });
     }
     if (leaf) workspace.revealLeaf(leaf);
-  }
-
-  private registerDebugCommands(): void {
-    this.addCommand({
-      id: "plaud-debug-list",
-      name: "[debug] Plaud: 녹음 목록 조회 (콘솔 출력)",
-      callback: async () => {
-        if (!this.token) {
-          new Notice("먼저 설정에서 로그인해 주세요.");
-          return;
-        }
-        try {
-          const list = await listRecordings(this.token);
-          console.log(`[A4P Plaud] listRecordings → ${list.length}개`, list);
-          new Notice(`녹음 ${list.length}개 (콘솔 확인)`);
-        } catch (e) {
-          console.error("[A4P Plaud] listRecordings error", e);
-          new Notice(`오류: ${(e as Error).message ?? "unknown"}`);
-        }
-      },
-    });
-
-    this.addCommand({
-      id: "plaud-debug-detail",
-      name: "[debug] Plaud: 첫 녹음 상세 (콘솔 출력)",
-      callback: async () => {
-        if (!this.token) {
-          new Notice("먼저 설정에서 로그인해 주세요.");
-          return;
-        }
-        try {
-          const list = await listRecordings(this.token);
-          if (list.length === 0) {
-            new Notice("녹음이 없습니다.");
-            return;
-          }
-          const detail = await getRecordingDetail(this.token, list[0].id);
-          console.log("[A4P Plaud] getRecordingDetail", detail);
-          new Notice(
-            `첫 녹음 상세 (콘솔 확인) — 트랜스크립트 길이: ${detail.transcript.length}자`
-          );
-        } catch (e) {
-          console.error("[A4P Plaud] getRecordingDetail error", e);
-          new Notice(`오류: ${(e as Error).message ?? "unknown"}`);
-        }
-      },
-    });
-
-    this.addCommand({
-      id: "plaud-debug-mp3",
-      name: "[debug] Plaud: 첫 녹음 mp3 URL",
-      callback: async () => {
-        if (!this.token) {
-          new Notice("먼저 설정에서 로그인해 주세요.");
-          return;
-        }
-        try {
-          const list = await listRecordings(this.token);
-          if (list.length === 0) {
-            new Notice("녹음이 없습니다.");
-            return;
-          }
-          const url = await getMp3Url(this.token, list[0].id);
-          console.log("[A4P Plaud] getMp3Url", url);
-          new Notice(url ? "mp3 URL 받음 (콘솔 확인)" : "mp3 URL을 받지 못했습니다.");
-        } catch (e) {
-          console.error("[A4P Plaud] getMp3Url error", e);
-          new Notice(`오류: ${(e as Error).message ?? "unknown"}`);
-        }
-      },
-    });
   }
 
   private async loadSettings(): Promise<void> {

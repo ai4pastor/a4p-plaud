@@ -1,6 +1,6 @@
 {
   "name": "a4p-plaud",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Plaud recordings & transcripts inside Obsidian (read-only) with sidebar streaming player",
   "main": "main.js",
   "scripts": {
