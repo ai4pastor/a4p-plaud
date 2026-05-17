@@ -23,11 +23,14 @@ export default class A4PPlaudPlugin extends Plugin {
   settings: PlaudSettings = { ...DEFAULT_SETTINGS };
   private token: PlaudTokenData | null = null;
   private user: PlaudUserInfo | null = null;
+  private statusBarEl: HTMLElement | null = null;
 
   async onload(): Promise<void> {
     console.log("A4P Plaud loaded");
     await this.loadSettings();
     await this.restoreSession();
+    this.statusBarEl = this.addStatusBarItem();
+    this.statusBarEl.style.display = "none";
     this.addSettingTab(new PlaudSettingTab(this.app, this));
 
     this.registerView(PLAUD_VIEW_TYPE, (leaf) => new PlaudListView(leaf, this));
@@ -175,5 +178,44 @@ export default class A4PPlaudPlugin extends Plugin {
 
   getToken(): PlaudTokenData | null {
     return this.token;
+  }
+
+  getGroqKey(): string | null {
+    if (!this.settings.encryptedGroqKey || !isEncryptionAvailable()) return null;
+    try {
+      return decryptFromBase64(this.settings.encryptedGroqKey);
+    } catch {
+      return null;
+    }
+  }
+
+  getOpenaiKey(): string | null {
+    if (!this.settings.encryptedOpenaiKey || !isEncryptionAvailable()) return null;
+    try {
+      return decryptFromBase64(this.settings.encryptedOpenaiKey);
+    } catch {
+      return null;
+    }
+  }
+
+  async setGroqKey(plain: string | null): Promise<void> {
+    this.settings.encryptedGroqKey = plain ? encryptToBase64(plain) : null;
+    await this.saveSettings();
+  }
+
+  async setOpenaiKey(plain: string | null): Promise<void> {
+    this.settings.encryptedOpenaiKey = plain ? encryptToBase64(plain) : null;
+    await this.saveSettings();
+  }
+
+  setStatusBar(text: string): void {
+    if (!this.statusBarEl) return;
+    if (!text) {
+      this.statusBarEl.style.display = "none";
+      this.statusBarEl.setText("");
+    } else {
+      this.statusBarEl.style.display = "";
+      this.statusBarEl.setText(text);
+    }
   }
 }

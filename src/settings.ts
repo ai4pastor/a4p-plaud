@@ -3,7 +3,7 @@ import type A4PPlaudPlugin from "./main";
 import { PlaudAuthError } from "./auth";
 import { PlaudApiError } from "./api";
 import { isEncryptionAvailable } from "./storage";
-import { PlaudRegion, PlaudUserInfo } from "./types";
+import { PlaudRegion, PlaudUserInfo, SttProvider } from "./types";
 
 class MarkdownFileSuggester extends FuzzySuggestModal<TFile> {
   constructor(app: App, private onPick: (file: TFile) => void) {
@@ -108,6 +108,154 @@ export class PlaudSettingTab extends PluginSettingTab {
           tplTextRef?.setValue("");
         })
     );
+
+    this.renderSttSection(containerEl);
+  }
+
+  private renderSttSection(el: HTMLElement): void {
+    el.createEl("h3", { text: "외부 STT 전사" });
+
+    const intro = el.createDiv();
+    intro.style.padding = "0.7em 1em";
+    intro.style.background = "var(--background-secondary)";
+    intro.style.borderRadius = "6px";
+    intro.style.marginBottom = "0.8em";
+    intro.style.fontSize = "0.88em";
+    intro.style.lineHeight = "1.55";
+    intro.setText(
+      "Plaud에서 아직 전사되지 않은 녹음을 옵시디언 안에서 직접 전사할 수 있습니다. " +
+        "Groq Whisper(500MB·무료 수준) 또는 OpenAI Whisper(25MB·유료)를 선택하세요. " +
+        "키는 OS 키체인으로 암호화 저장됩니다."
+    );
+
+    new Setting(el)
+      .setName("기본 공급자")
+      .setDesc("STT 버튼을 누르면 사용할 기본 공급자")
+      .addDropdown((d) =>
+        d
+          .addOption("groq", "Groq Whisper (추천)")
+          .addOption("openai", "OpenAI Whisper")
+          .setValue(this.plugin.settings.sttProvider)
+          .onChange(async (v) => {
+            this.plugin.settings.sttProvider = v as SttProvider;
+            await this.plugin.persistSettings();
+          })
+      );
+
+    // Groq 키
+    new Setting(el)
+      .setName("Groq API 키")
+      .setDesc("https://console.groq.com 에서 발급. 저장 후 입력란은 비워집니다.")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder(
+          this.plugin.getGroqKey() ? "✓ 저장됨 (변경하려면 새 키 입력)" : "gsk_..."
+        );
+        t.onChange(async (v) => {
+          const k = v.trim();
+          if (!k) return;
+          try {
+            await this.plugin.setGroqKey(k);
+            t.setValue("");
+            t.setPlaceholder("✓ 저장됨 (변경하려면 새 키 입력)");
+            new Notice("Groq 키 저장됨");
+          } catch (e) {
+            new Notice("Groq 키 저장 실패");
+          }
+        });
+      })
+      .addButton((b) =>
+        b
+          .setButtonText("삭제")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.setGroqKey(null);
+            new Notice("Groq 키 삭제됨");
+            this.display();
+          })
+      );
+
+    // OpenAI 키
+    new Setting(el)
+      .setName("OpenAI API 키")
+      .setDesc("https://platform.openai.com 에서 발급. 저장 후 입력란은 비워집니다.")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder(
+          this.plugin.getOpenaiKey() ? "✓ 저장됨 (변경하려면 새 키 입력)" : "sk-..."
+        );
+        t.onChange(async (v) => {
+          const k = v.trim();
+          if (!k) return;
+          try {
+            await this.plugin.setOpenaiKey(k);
+            t.setValue("");
+            t.setPlaceholder("✓ 저장됨 (변경하려면 새 키 입력)");
+            new Notice("OpenAI 키 저장됨");
+          } catch (e) {
+            new Notice("OpenAI 키 저장 실패");
+          }
+        });
+      })
+      .addButton((b) =>
+        b
+          .setButtonText("삭제")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.setOpenaiKey(null);
+            new Notice("OpenAI 키 삭제됨");
+            this.display();
+          })
+      );
+
+    new Setting(el)
+      .setName("언어 (선택)")
+      .setDesc("ISO 639-1 코드 (예: ko, en, ja). 빈 값이면 자동 감지.")
+      .addText((t) =>
+        t
+          .setPlaceholder("ko")
+          .setValue(this.plugin.settings.sttLanguage)
+          .onChange(async (v) => {
+            this.plugin.settings.sttLanguage = v.trim();
+            await this.plugin.persistSettings();
+          })
+      );
+
+    new Setting(el)
+      .setName("Groq 모델")
+      .setDesc("기본값: whisper-large-v3-turbo")
+      .addText((t) =>
+        t
+          .setPlaceholder("whisper-large-v3-turbo")
+          .setValue(this.plugin.settings.sttGroqModel)
+          .onChange(async (v) => {
+            this.plugin.settings.sttGroqModel = v.trim() || "whisper-large-v3-turbo";
+            await this.plugin.persistSettings();
+          })
+      );
+
+    new Setting(el)
+      .setName("OpenAI 모델")
+      .setDesc("기본값: whisper-1")
+      .addText((t) =>
+        t
+          .setPlaceholder("whisper-1")
+          .setValue(this.plugin.settings.sttOpenaiModel)
+          .onChange(async (v) => {
+            this.plugin.settings.sttOpenaiModel = v.trim() || "whisper-1";
+            await this.plugin.persistSettings();
+          })
+      );
+
+    new Setting(el)
+      .setName("자동 폴백")
+      .setDesc("기본 공급자가 실패하면 자동으로 다른 공급자로 재시도합니다.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.sttAutoFallback).onChange(async (v) => {
+          this.plugin.settings.sttAutoFallback = v;
+          await this.plugin.persistSettings();
+        })
+      );
   }
 
   private renderLoggedIn(el: HTMLElement, user: PlaudUserInfo, region: PlaudRegion): void {

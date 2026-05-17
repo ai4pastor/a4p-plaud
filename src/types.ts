@@ -68,15 +68,57 @@ export interface PlaudRecordingDetail extends PlaudRecording {
   summary?: string;
 }
 
+export type SttProvider = "groq" | "openai";
+
 export interface PlaudSettings {
   encryptedToken: string | null;
   importFolder: string;
   /** 기본 임포트 템플릿 (.md 파일의 vault 내 경로). 빈 문자열이면 내장 형식 사용. */
   templatePath: string;
+  /** 외부 STT 디폴트 공급자 */
+  sttProvider: SttProvider;
+  /** 공급자별 암호화 API 키 */
+  encryptedGroqKey: string | null;
+  encryptedOpenaiKey: string | null;
+  /** 모델 (빈 값이면 공급자별 기본 모델) */
+  sttGroqModel: string;
+  sttOpenaiModel: string;
+  /** 언어 hint ("" = 자동, "ko" = 한국어, "en" = 영어 등 ISO 639-1) */
+  sttLanguage: string;
+  /** 디폴트 공급자 실패 시 자동으로 다른 공급자 시도 */
+  sttAutoFallback: boolean;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
   encryptedToken: null,
   importFolder: "Plaud",
   templatePath: "",
+  sttProvider: "groq",
+  encryptedGroqKey: null,
+  encryptedOpenaiKey: null,
+  sttGroqModel: "whisper-large-v3-turbo",
+  sttOpenaiModel: "whisper-1",
+  sttLanguage: "ko",
+  sttAutoFallback: false,
 };
+
+/** 공급자별 최대 파일 크기 (바이트) */
+export const STT_MAX_FILE_SIZE: Record<SttProvider, number> = {
+  groq: 500 * 1024 * 1024, // 500MB
+  openai: 25 * 1024 * 1024, // 25MB
+};
+
+/** 공급자별 분당 예상 비용 (USD) — 사전 안내용 */
+export const STT_COST_PER_HOUR: Record<SttProvider, number> = {
+  groq: 0.04,
+  openai: 0.36,
+};
+
+export interface SttResult {
+  text: string;
+  provider: SttProvider;
+  model: string;
+  language?: string;
+  /** 전사 완료 시각 (epoch ms) */
+  at: number;
+}

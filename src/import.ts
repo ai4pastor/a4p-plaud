@@ -1,5 +1,5 @@
 import { App, TFile, normalizePath } from "obsidian";
-import { PlaudRecordingDetail, PlaudRegion } from "./types";
+import { PlaudRecordingDetail, PlaudRegion, SttResult } from "./types";
 import { formatDuration, formatStartTime, formatStartTimeForFilename } from "./format";
 
 export function findNoteByPlaudId(app: App, plaudId: string): TFile | null {
@@ -64,9 +64,13 @@ export function applyTemplate(template: string, vars: TemplateVars): string {
   });
 }
 
-function buildDefaultContent(detail: PlaudRecordingDetail, region: PlaudRegion): string {
+function buildDefaultContent(
+  detail: PlaudRecordingDetail,
+  region: PlaudRegion,
+  stt?: SttResult
+): string {
   const vars = buildVars(detail, region);
-  const fm = [
+  const fmLines = [
     "---",
     `plaud_id: ${yamlString(vars.plaud_id)}`,
     `source: plaud`,
@@ -75,11 +79,15 @@ function buildDefaultContent(detail: PlaudRecordingDetail, region: PlaudRegion):
     `region: ${yamlString(vars.region)}`,
     `filename: ${yamlString(vars.filename)}`,
     `imported_at: ${yamlString(vars.imported_at)}`,
-    `tags:`,
-    `  - plaud`,
-    "---",
-    "",
-  ].join("\n");
+  ];
+  if (stt) {
+    fmLines.push(`stt_provider: ${yamlString(stt.provider)}`);
+    fmLines.push(`stt_model: ${yamlString(stt.model)}`);
+    fmLines.push(`stt_at: ${yamlString(formatStartTime(stt.at))}`);
+    if (stt.language) fmLines.push(`stt_language: ${yamlString(stt.language)}`);
+  }
+  fmLines.push(`tags:`, `  - plaud`, "---", "");
+  const fm = fmLines.join("\n");
 
   const body = [
     `> [!info] Plaud 원본`,
@@ -239,6 +247,8 @@ async function runTemplaterOnDisk(app: App, file: TFile): Promise<boolean> {
 export interface ImportOptions {
   templatePath?: string;
   runTemplater?: boolean;
+  /** 외부 STT 결과 — frontmatter에 출처 메타 기록 */
+  stt?: SttResult;
 }
 
 export async function importRecording(
@@ -256,7 +266,7 @@ export async function importRecording(
   const finalPath = await uniquePath(app, desired);
 
   const vars = buildVars(detail, region);
-  const defaultContent = buildDefaultContent(detail, region);
+  const defaultContent = buildDefaultContent(detail, region, options.stt);
   const tpl = await loadTemplateContent(app, options.templatePath ?? "");
 
   let content: string;

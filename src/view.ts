@@ -4,7 +4,19 @@ import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError } from "./
 import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
-import { PlaudRecording, PlaudRecordingDetail } from "./types";
+import {
+  PlaudRecording,
+  PlaudRecordingDetail,
+  STT_COST_PER_HOUR,
+  STT_MAX_FILE_SIZE,
+  SttResult,
+} from "./types";
+import { downloadMp3, SttError, transcribeAudio } from "./stt";
+
+/** 세션 동안 plaud_id → STT 결과 캐시 (모달 닫혀도 유지) */
+const sttCache: Map<string, SttResult> = new Map();
+/** 진행 중 plaud_id → 상태 텍스트 (상태바·모달 공유) */
+const sttInProgress: Map<string, string> = new Map();
 
 export const PLAUD_VIEW_TYPE = "a4p-plaud-list-view";
 
@@ -554,6 +566,9 @@ class PlaudDetailModal extends Modal {
         sum.setText(detail.summary);
       }
 
+      // STT 영역: 전사 안 됐고 캐시도 없을 때 버튼, 캐시 있으면 결과 표시
+      this.renderSttSection(contentEl, detail);
+
       contentEl.createEl("h4", { text: "트랜스크립트" });
       const tr = contentEl.createDiv();
       tr.style.maxHeight = "50vh";
@@ -563,7 +578,11 @@ class PlaudDetailModal extends Modal {
       tr.style.padding = "8px";
       tr.style.background = "var(--background-secondary)";
       tr.style.borderRadius = "6px";
-      tr.setText(detail.transcript || "전사된 트랜스크립트가 없습니다.");
+      const cached = sttCache.get(detail.id);
+      const displayText =
+        detail.transcript ||
+        (cached ? cached.text : "전사된 트랜스크립트가 없습니다.");
+      tr.setText(displayText);
     } catch (e) {
       const msg =
         e instanceof PlaudApiError || e instanceof PlaudAuthError
@@ -633,12 +652,16 @@ class PlaudDetailModal extends Modal {
         const token = this.plugin.getToken();
         const region = token?.region ?? "us";
         const tplPath = tplInput.value.trim();
+        // STT 결과가 캐시에 있으면 transcript 자리에 사용
+        const stt = sttCache.get(detail.id);
+        const effective: PlaudRecordingDetail =
+          stt && !detail.transcript ? { ...detail, transcript: stt.text } : detail;
         const { file, existed } = await importRecording(
           this.app,
-          detail,
+          effective,
           region,
           this.plugin.settings.importFolder,
-          { templatePath: tplPath || undefined }
+          { templatePath: tplPath || undefined, stt: stt ?? undefined }
         );
         new Notice(existed ? "이미 임포트된 녹음입니다." : `노트 생성: ${file.path}`);
         this.parentView?.notifyImported(detail.id, file);
@@ -650,6 +673,158 @@ class PlaudDetailModal extends Modal {
         importBtn.setText("노트로 가져오기");
       }
     });
+  }
+
+  private renderSttSection(parent: HTMLElement, detail: PlaudRecordingDetail): void {
+    if (detail.transcript) return; // Plaud가 이미 전사함
+
+    const cached = sttCache.get(detail.id);
+    const ongoing = sttInProgress.get(detail.id);
+
+    parent.createEl("h4", { text: "🎤 외부 STT 전사" });
+    const box = parent.createDiv();
+    box.style.padding = "10px 12px";
+    box.style.marginBottom = "1em";
+    box.style.border = "1px solid var(--background-modifier-border)";
+    box.style.borderRadius = "6px";
+
+    if (cached) {
+      const ok = box.createDiv({
+        text: `✅ ${cached.provider} (${cached.model}) — ${cached.text.length}자 전사 완료`,
+      });
+      ok.style.fontSize = "0.9em";
+      ok.style.color = "var(--text-success, var(--text-normal))";
+      ok.style.marginBottom = "4px";
+      const note = box.createDiv({
+        text: "임포트 시 본문 트랜스크립트로 자동 사용됩니다.",
+      });
+      note.style.fontSize = "0.82em";
+      note.style.color = "var(--text-muted)";
+      return;
+    }
+
+    if (ongoing) {
+      const live = box.createDiv({ text: ongoing });
+      live.style.fontSize = "0.9em";
+      // 200ms마다 sttInProgress 상태 폴링하여 UI 갱신
+      const timer = window.setInterval(() => {
+        const t = sttInProgress.get(detail.id);
+        if (t) {
+          live.setText(t);
+          return;
+        }
+        // 완료 또는 실패 → 모달 재렌더
+        window.clearInterval(timer);
+        this.onOpen();
+      }, 250);
+      this.scope.register([], "Escape", () => {
+        window.clearInterval(timer);
+      });
+      return;
+    }
+
+    const provider = this.plugin.settings.sttProvider;
+    const max = STT_MAX_FILE_SIZE[provider];
+    const sizeStr = detail.filesize
+      ? `${(detail.filesize / 1024 / 1024).toFixed(1)} MB`
+      : "크기 불명";
+    const tooBig = !!detail.filesize && detail.filesize > max;
+    const estHours = (detail.duration ?? 0) / 1000 / 3600;
+    const estCost = estHours * STT_COST_PER_HOUR[provider];
+
+    const info = box.createDiv();
+    info.style.fontSize = "0.88em";
+    info.style.marginBottom = "8px";
+    info.innerHTML =
+      `공급자: <b>${provider}</b> · 파일: ${sizeStr} · ` +
+      `예상 비용: <b>$${estCost.toFixed(3)}</b> · ` +
+      `최대: ${(max / 1024 / 1024).toFixed(0)} MB`;
+
+    if (tooBig) {
+      const warn = box.createDiv({
+        text: `⚠️ 파일이 ${provider} 제한을 초과합니다. Groq로 전환하거나 외부 도구로 분할해 주세요.`,
+      });
+      warn.style.color = "var(--text-error)";
+      warn.style.fontSize = "0.85em";
+      return;
+    }
+
+    const hasKey =
+      provider === "groq" ? !!this.plugin.getGroqKey() : !!this.plugin.getOpenaiKey();
+    if (!hasKey) {
+      const warn = box.createDiv({
+        text: `⚠️ 설정에 ${provider} API 키를 먼저 입력해 주세요.`,
+      });
+      warn.style.color = "var(--text-error)";
+      warn.style.fontSize = "0.85em";
+      return;
+    }
+
+    const startBtn = box.createEl("button", { text: "🎤 외부 STT로 전사 시작" });
+    startBtn.addClass("mod-cta");
+    startBtn.addEventListener("click", () => void this.runStt(detail));
+  }
+
+  private async runStt(detail: PlaudRecordingDetail): Promise<void> {
+    const token = this.plugin.getToken();
+    if (!token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    const start = Date.now();
+    const setStatus = (s: string) => {
+      sttInProgress.set(detail.id, s);
+      this.plugin.setStatusBar(s);
+    };
+    setStatus("🎤 mp3 URL 요청 중...");
+    // 진행 시간 갱신 타이머
+    const tick = window.setInterval(() => {
+      const cur = sttInProgress.get(detail.id);
+      if (!cur) {
+        window.clearInterval(tick);
+        return;
+      }
+      const sec = ((Date.now() - start) / 1000).toFixed(1);
+      // 단계 텍스트에 (Ns) 갱신
+      const base = cur.replace(/\s*\([0-9.]+초\)\s*$/, "");
+      setStatus(`${base} (${sec}초)`);
+    }, 250);
+
+    try {
+      // 모달 재렌더로 진행 영역 표시 전환
+      this.onOpen();
+
+      const url = await getMp3Url(token, detail.id);
+      if (!url) throw new SttError("DOWNLOAD_FAILED", "mp3 URL을 받지 못했습니다.");
+
+      setStatus("🎤 mp3 다운로드 중...");
+      const audio = await downloadMp3(url);
+
+      setStatus("🎤 STT 서버에 업로드 + 전사 중...");
+      const result = await transcribeAudio({
+        provider: this.plugin.settings.sttProvider,
+        groqKey: this.plugin.getGroqKey(),
+        openaiKey: this.plugin.getOpenaiKey(),
+        groqModel: this.plugin.settings.sttGroqModel,
+        openaiModel: this.plugin.settings.sttOpenaiModel,
+        language: this.plugin.settings.sttLanguage,
+        audio,
+        filename: `${detail.id}.mp3`,
+        autoFallback: this.plugin.settings.sttAutoFallback,
+      });
+
+      sttCache.set(detail.id, result);
+      new Notice(`✅ STT 전사 완료 (${result.provider}, ${result.text.length}자)`);
+    } catch (e) {
+      const msg = e instanceof SttError ? e.message : (e as Error).message ?? "알 수 없는 오류";
+      new Notice(`STT 실패: ${msg}`);
+    } finally {
+      sttInProgress.delete(detail.id);
+      this.plugin.setStatusBar("");
+      window.clearInterval(tick);
+      // 모달이 아직 열려있으면 갱신
+      this.onOpen();
+    }
   }
 
   onClose(): void {
