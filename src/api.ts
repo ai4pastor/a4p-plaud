@@ -50,6 +50,10 @@ export async function plaudRequest(
         headers: {
           Authorization: `Bearer ${token.accessToken}`,
           "Content-Type": "application/json",
+          // web 클라이언트가 보내는 헤더 — 쓰기 엔드포인트가 일부를 요구할 수 있음
+          "app-platform": "web",
+          "app-language": "en",
+          "edit-from": "web",
         },
         body: options.body,
         throw: false,
@@ -193,6 +197,51 @@ export async function getRecordingDetail(
     undefined;
 
   return { ...base, transcript, summary };
+}
+
+/**
+ * Plaud 서버의 녹음 이름을 변경한다.
+ * PATCH /file/{id}  body: { file_name: "..." }
+ * (web 클라이언트가 사용하는 엔드포인트를 따름. body 키는 file_name으로 추정.)
+ *
+ * 호환 시도 순서: file_name → filename → name
+ * 200/0 외 응답은 콘솔에 자세히 로깅한다.
+ */
+export async function renameRecording(
+  token: PlaudTokenData,
+  id: string,
+  newName: string
+): Promise<void> {
+  const candidates = [
+    { file_name: newName },
+    { filename: newName },
+    { name: newName },
+  ];
+  let lastErr: unknown = null;
+  for (const body of candidates) {
+    try {
+      const { data } = await plaudRequest(`/file/${encodeURIComponent(id)}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      // status 필드 검사 — 0이면 성공, 다른 값이면 다른 키 시도
+      const apiStatus = (data as Record<string, unknown>).status;
+      if (apiStatus === undefined || apiStatus === 0) {
+        console.log("[A4P Plaud] rename 성공", { id, body, response: data });
+        return;
+      }
+      console.warn("[A4P Plaud] rename 응답 비정상 status", { id, body, response: data });
+      lastErr = new PlaudApiError(
+        "BAD_RESPONSE",
+        `Plaud 응답 status=${apiStatus} msg=${(data as Record<string, unknown>).msg ?? "(없음)"}`
+      );
+    } catch (e) {
+      console.warn("[A4P Plaud] rename 시도 실패", { id, body, error: e });
+      lastErr = e;
+    }
+  }
+  if (lastErr instanceof Error) throw lastErr;
+  throw new PlaudApiError("UNKNOWN", "rename 실패 (모든 body 키 시도)");
 }
 
 export async function getMp3Url(
