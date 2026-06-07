@@ -1,7 +1,7 @@
 {
   "id": "a4p-plaud",
   "name": "A4P plaud",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Plaud 녹음·전사록을 옵시디언으로 가져오고 스트리밍 재생, 템플릿 임포트, 성경 wikilink, 외부 STT 전사(Groq/OpenAI)를 지원합니다.",
   "author": "abadcsh",
