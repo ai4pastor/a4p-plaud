@@ -1,43 +1,27 @@
 /**
- * Plaud의 region 라벨. 알려진 값: "us", "eu", "apne1" 등.
- * 서버의 -302 응답에서 새 도메인이 오면 동적으로 추가될 수 있어 string으로 둔다.
+ * (구) Plaud region 라벨. MCP 전환 후에는 단일 엔드포인트라 사실상 미사용이지만,
+ * import 템플릿 변수 {{region}} 호환을 위해 문자열 별칭으로 유지한다.
  */
 export type PlaudRegion = string;
 
-export function plaudBaseUrl(region: PlaudRegion): string {
-  if (region === "us") return "https://api.plaud.ai";
-  if (region === "eu") return "https://api-euc1.plaud.ai";
-  return `https://api-${region}.plaud.ai`;
-}
+/** 공식 MCP 서버 (OAuth + JSON-RPC) */
+export const PLAUD_MCP_BASE = "https://mcp.plaud.ai";
+export const PLAUD_MCP_ENDPOINT = `${PLAUD_MCP_BASE}/mcp`;
+/** OAuth redirect — Obsidian 커스텀 프로토콜 핸들러 */
+export const PLAUD_OAUTH_PROTOCOL = "a4p-plaud-oauth";
+export const PLAUD_OAUTH_REDIRECT = `obsidian://${PLAUD_OAUTH_PROTOCOL}`;
 
 /**
- * 도메인 문자열에서 region 라벨을 추출한다. 풀 URL("https://api-apne1.plaud.ai")과
- * 호스트만("api-apne1.plaud.ai") 모두 지원.
- *   "api-apne1.plaud.ai" → "apne1"
- *   "api-euc1.plaud.ai"  → "eu"  (별칭 통일)
- *   "api.plaud.ai"       → "us"
+ * OAuth 2.1 토큰 번들. mcp.plaud.ai/token 응답 + 동적 등록 client_id.
+ * 만료 시 refreshToken으로 자동 재발급한다.
  */
-export function plaudRegionFromDomain(domain: string): PlaudRegion {
-  let host = domain;
-  try {
-    host = new URL(domain).hostname;
-  } catch {
-    // 풀 URL이 아닌 경우 그대로 사용
-  }
-  const m = host.match(/^api(?:-([^.]+))?\./);
-  if (!m) return "us";
-  const label = m[1];
-  if (!label) return "us";
-  if (label === "euc1") return "eu";
-  return label;
-}
-
 export interface PlaudTokenData {
   accessToken: string;
-  tokenType: string;
-  issuedAt: number;
+  refreshToken: string;
+  clientId: string;
+  /** access token 만료 시각 (epoch ms) */
   expiresAt: number;
-  region: PlaudRegion;
+  tokenType: string;
 }
 
 export interface PlaudUserInfo {
@@ -71,6 +55,7 @@ export interface PlaudRecordingDetail extends PlaudRecording {
 export type SttProvider = "groq" | "openai";
 
 export interface PlaudSettings {
+  /** safeStorage로 암호화한 PlaudTokenData(OAuth 번들) JSON */
   encryptedToken: string | null;
   importFolder: string;
   /** 기본 임포트 템플릿 (.md 파일의 vault 내 경로). 빈 문자열이면 내장 형식 사용. */

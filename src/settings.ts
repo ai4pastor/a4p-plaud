@@ -3,7 +3,7 @@ import type A4PPlaudPlugin from "./main";
 import { PlaudAuthError } from "./auth";
 import { PlaudApiError } from "./api";
 import { isEncryptionAvailable } from "./storage";
-import { PlaudRegion, PlaudUserInfo, SttProvider } from "./types";
+import { PlaudUserInfo, SttProvider } from "./types";
 
 class MarkdownFileSuggester extends FuzzySuggestModal<TFile> {
   constructor(app: App, private onPick: (file: TFile) => void) {
@@ -23,7 +23,6 @@ class MarkdownFileSuggester extends FuzzySuggestModal<TFile> {
 
 export class PlaudSettingTab extends PluginSettingTab {
   plugin: A4PPlaudPlugin;
-  private tokenInput = "";
 
   constructor(app: App, plugin: A4PPlaudPlugin) {
     super(app, plugin);
@@ -43,18 +42,18 @@ export class PlaudSettingTab extends PluginSettingTab {
       warn.style.borderRadius = "6px";
       warn.style.marginBottom = "1em";
       warn.setText(
-        "⚠️ 이 시스템에서는 비밀 저장소(safeStorage)를 사용할 수 없어 토큰을 안전하게 보관할 수 없습니다."
+        "⚠️ 이 시스템에서는 비밀 저장소(safeStorage)를 사용할 수 없어 로그인 토큰을 안전하게 보관할 수 없습니다."
       );
       return;
     }
 
     const status = this.plugin.getLoginStatus();
-    if (status.loggedIn && status.user && status.region) {
-      this.renderLoggedIn(containerEl, status.user, status.region);
+    if (status.loggedIn && status.user) {
+      this.renderLoggedIn(containerEl, status.user);
     } else if (this.plugin.hasStoredToken() && !status.user) {
       this.renderTokenButNoUser(containerEl);
     } else {
-      this.renderTokenForm(containerEl);
+      this.renderLoginForm(containerEl);
     }
 
     containerEl.createEl("h3", { text: "임포트" });
@@ -110,6 +109,113 @@ export class PlaudSettingTab extends PluginSettingTab {
     );
 
     this.renderSttSection(containerEl);
+  }
+
+  private renderLoginForm(el: HTMLElement): void {
+    const guide = el.createDiv();
+    guide.style.padding = "0.9em 1em";
+    guide.style.background = "var(--background-secondary)";
+    guide.style.borderRadius = "6px";
+    guide.style.marginBottom = "1em";
+    guide.style.lineHeight = "1.6";
+    guide.style.fontSize = "0.92em";
+
+    guide.createEl("p", {
+      text:
+        "아래 'Plaud 로그인' 버튼을 누르면 브라우저가 열립니다. 평소 쓰시던 방식(구글·Apple·이메일) 그대로 로그인하면 됩니다. " +
+        "기존 녹음이 그대로 연결됩니다.",
+    }).style.marginTop = "0";
+
+    const p2 = guide.createEl("p");
+    p2.style.margin = "0 0 0.5em 0";
+    p2.innerHTML =
+      "로그인 후에는 토큰이 <b>자동으로 갱신</b>되므로, 며칠마다 다시 로그인할 필요가 없습니다. " +
+      "(공식 Plaud 연결 방식을 사용합니다.)";
+
+    const sec = guide.createEl("p");
+    sec.style.fontSize = "0.85em";
+    sec.style.margin = "0";
+    sec.style.color = "var(--text-muted)";
+    sec.setText(
+      "🔒 로그인 토큰은 OS 키체인(safeStorage)으로 암호화되어 vault에 평문으로 저장되지 않습니다. " +
+        "비밀번호는 플러그인이 저장하지 않으며, 로그인은 브라우저에서만 이뤄집니다."
+    );
+
+    new Setting(el)
+      .setName("Plaud 계정")
+      .setDesc("브라우저로 안전하게 로그인 (OAuth)")
+      .addButton((btn) =>
+        btn
+          .setButtonText("Plaud 로그인")
+          .setCta()
+          .onClick(() => void this.plugin.startLogin())
+      );
+  }
+
+  private renderLoggedIn(el: HTMLElement, user: PlaudUserInfo): void {
+    const box = el.createDiv();
+    box.style.padding = "0.75em 1em";
+    box.style.background = "var(--background-secondary)";
+    box.style.borderRadius = "6px";
+    box.style.marginBottom = "1em";
+    box.createEl("p", { text: `로그인됨: ${user.email || "(계정)"}` }).style.margin = "0.25em 0";
+    if (user.nickname)
+      box.createEl("p", { text: `닉네임: ${user.nickname}` }).style.margin = "0.25em 0";
+    if (user.membership_type && user.membership_type !== "unknown")
+      box.createEl("p", { text: `멤버십: ${user.membership_type}` }).style.margin = "0.25em 0";
+    box.createEl("p", {
+      text: "자동 갱신: ✅ 사용 중 (토큰 만료 시 자동으로 재발급됩니다)",
+    }).style.margin = "0.25em 0";
+
+    new Setting(el)
+      .setName("로그아웃")
+      .setDesc("저장된 로그인 토큰을 삭제합니다. 다시 사용하려면 재로그인이 필요합니다.")
+      .addButton((btn) =>
+        btn
+          .setButtonText("로그아웃")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.logout();
+            new Notice("로그아웃되었습니다.");
+            this.display();
+          })
+      );
+  }
+
+  private renderTokenButNoUser(el: HTMLElement): void {
+    const info = el.createDiv();
+    info.style.padding = "0.75em 1em";
+    info.style.border = "1px solid var(--background-modifier-border)";
+    info.style.borderRadius = "6px";
+    info.style.marginBottom = "1em";
+    info.setText(
+      "로그인 토큰은 있지만 사용자 정보를 가져오지 못했습니다. 네트워크를 확인하거나 재시도해 주세요."
+    );
+
+    new Setting(el).addButton((btn) =>
+      btn
+        .setButtonText("재시도")
+        .setCta()
+        .onClick(async () => {
+          btn.setDisabled(true).setButtonText("확인 중...");
+          try {
+            await this.plugin.refreshUser();
+            this.display();
+          } catch (e) {
+            new Notice(this.errMsg(e));
+            btn.setDisabled(false).setButtonText("재시도");
+          }
+        })
+    );
+    new Setting(el).addButton((btn) =>
+      btn
+        .setButtonText("로그아웃")
+        .setWarning()
+        .onClick(async () => {
+          await this.plugin.logout();
+          this.display();
+        })
+    );
   }
 
   private renderSttSection(el: HTMLElement): void {
@@ -258,183 +364,8 @@ export class PlaudSettingTab extends PluginSettingTab {
       );
   }
 
-  private renderLoggedIn(el: HTMLElement, user: PlaudUserInfo, region: PlaudRegion): void {
-    const box = el.createDiv();
-    box.style.padding = "0.75em 1em";
-    box.style.background = "var(--background-secondary)";
-    box.style.borderRadius = "6px";
-    box.style.marginBottom = "1em";
-    box.createEl("p", { text: `로그인됨: ${user.email}` }).style.margin = "0.25em 0";
-    if (user.nickname)
-      box.createEl("p", { text: `닉네임: ${user.nickname}` }).style.margin = "0.25em 0";
-    box.createEl("p", { text: `멤버십: ${user.membership_type}` }).style.margin = "0.25em 0";
-    box.createEl("p", { text: `리전: ${region.toUpperCase()}` }).style.margin = "0.25em 0";
-
-    new Setting(el)
-      .setName("로그아웃")
-      .setDesc("저장된 토큰을 삭제합니다. 다시 사용하려면 토큰 재입력이 필요합니다.")
-      .addButton((btn) =>
-        btn
-          .setButtonText("로그아웃")
-          .setWarning()
-          .onClick(async () => {
-            await this.plugin.logout();
-            new Notice("로그아웃되었습니다.");
-            this.display();
-          })
-      );
-  }
-
-  private renderTokenButNoUser(el: HTMLElement): void {
-    const info = el.createDiv();
-    info.style.padding = "0.75em 1em";
-    info.style.border = "1px solid var(--background-modifier-border)";
-    info.style.borderRadius = "6px";
-    info.style.marginBottom = "1em";
-    info.setText("저장된 토큰은 있지만 사용자 정보를 가져오지 못했습니다. 네트워크를 확인하거나 재시도해 주세요.");
-
-    new Setting(el).addButton((btn) =>
-      btn
-        .setButtonText("재시도")
-        .setCta()
-        .onClick(async () => {
-          btn.setDisabled(true).setButtonText("확인 중...");
-          try {
-            await this.plugin.refreshUser();
-            this.display();
-          } catch (e) {
-            new Notice(this.errMsg(e));
-            btn.setDisabled(false).setButtonText("재시도");
-          }
-        })
-    );
-    new Setting(el).addButton((btn) =>
-      btn
-        .setButtonText("로그아웃")
-        .setWarning()
-        .onClick(async () => {
-          await this.plugin.logout();
-          this.display();
-        })
-    );
-  }
-
-  private renderTokenForm(el: HTMLElement): void {
-    const guide = el.createDiv();
-    guide.style.padding = "0.9em 1em";
-    guide.style.background = "var(--background-secondary)";
-    guide.style.borderRadius = "6px";
-    guide.style.marginBottom = "1em";
-    guide.style.lineHeight = "1.6";
-    guide.style.fontSize = "0.92em";
-
-    guide.createEl("p", {
-      text:
-        "Plaud는 구글 로그인 등 OAuth만 지원해 옵시디언에서 직접 로그인할 수 없습니다. " +
-        "Plaud 웹앱에서 발급된 access_token(JWT)을 한 번만 복사해 붙여넣으면 약 300일간 사용할 수 있습니다.",
-    }).style.marginTop = "0";
-
-    // ───────── 방법 A: Network 탭 (권장)
-    const ha = guide.createEl("p", { text: "✅ 방법 A — Network 탭 (권장)" });
-    ha.style.fontWeight = "600";
-    ha.style.marginBottom = "0.2em";
-
-    const olA = guide.createEl("ol");
-    olA.style.paddingLeft = "1.3em";
-    olA.style.margin = "0.2em 0 0.8em 0";
-    const stepsA = [
-      "브라우저로 https://app.plaud.ai 에 로그인 (구글 로그인 그대로 OK).",
-      "개발자 도구 열기 — Mac: ⌘+⌥+I, Windows: F12. 상단에서 Network 탭으로 이동.",
-      "Plaud 웹에서 아무 동작 (예: 녹음 목록 새로고침, 녹음 한 개 클릭). Network 패널에 요청들이 흐릅니다.",
-      "요청 중 아무거나 하나 클릭 → 우측에 Headers 탭 → Request Headers 영역에서 'Authorization: Bearer ...' 줄을 찾습니다.",
-      "'Bearer ' 다음의 매우 긴 문자열(보통 eyJ로 시작, 200자 이상) 전체를 복사. 끝부분에 공백/줄바꿈이 들어가지 않게 주의.",
-      "아래 입력란에 붙여넣고 '저장 및 검증' 버튼.",
-    ];
-    for (const s of stepsA) olA.createEl("li", { text: s });
-
-    // ───────── 방법 B: Application 탭 (대안)
-    const hb = guide.createEl("p", { text: "🔁 방법 B — Application 탭 (대안)" });
-    hb.style.fontWeight = "600";
-    hb.style.marginBottom = "0.2em";
-
-    const olB = guide.createEl("ol");
-    olB.style.paddingLeft = "1.3em";
-    olB.style.margin = "0.2em 0 0.8em 0";
-    const stepsB = [
-      "개발자 도구 → Application 탭 → 좌측 Storage → Local Storage → https://app.plaud.ai 선택.",
-      "키 목록에서 'access_token' (또는 token / accessToken 비슷한 이름)을 찾아 값을 복사.",
-      "값이 eyJ로 시작하는 긴 문자열이면 그대로 사용 가능. 아닐 경우 방법 A를 사용해 주세요.",
-    ];
-    for (const s of stepsB) olB.createEl("li", { text: s });
-
-    // ───────── 리전 안내
-    const hr = guide.createEl("p", { text: "🌍 리전(서버 위치) 안내" });
-    hr.style.fontWeight = "600";
-    hr.style.marginBottom = "0.2em";
-
-    const pr = guide.createEl("p");
-    pr.style.fontSize = "0.88em";
-    pr.style.margin = "0 0 0.5em 0";
-    pr.innerHTML =
-      "Plaud는 사용자 위치에 따라 미국(US), 유럽(EU), 일본/아시아(APNE1) 등 여러 리전에 데이터가 저장됩니다. " +
-      "본 플러그인은 토큰을 받은 뒤 자동으로 올바른 리전을 감지합니다(필요 시 한 번 자동 재시도). " +
-      "검증 시 '<b>리전: APNE1</b>'처럼 표시되면 정상입니다.";
-
-    const pr2 = guide.createEl("p");
-    pr2.style.fontSize = "0.85em";
-    pr2.style.margin = "0 0 0.6em 0";
-    pr2.style.color = "var(--text-muted)";
-    pr2.setText(
-      "⚠️ '리전을 확인할 수 없습니다' 에러가 뜨면: ① 같은 브라우저에서 한 번 더 토큰을 받아 시도, " +
-      "② VPN 사용 중이면 끄고 다시 시도, ③ 그래도 실패 시 개발자 콘솔(⌘+⌥+I)에서 '[A4P Plaud] -302 redirect' 로그를 복사해 이슈로 보고해 주세요."
-    );
-
-    // ───────── 보안 안내
-    const ps = guide.createEl("p");
-    ps.style.fontSize = "0.85em";
-    ps.style.margin = "0";
-    ps.style.color = "var(--text-muted)";
-    ps.setText(
-      "🔒 입력한 토큰은 macOS 키체인(safeStorage)으로 암호화되어 vault에 평문으로 저장되지 않습니다. " +
-      "토큰 만료(약 300일 후) 시 같은 방법으로 새 토큰을 받아 다시 입력해 주세요."
-    );
-
-    new Setting(el)
-      .setName("Access Token")
-      .setDesc("위에서 복사한 JWT를 붙여넣어 주세요.")
-      .addTextArea((t) => {
-        t.inputEl.rows = 4;
-        t.inputEl.style.width = "100%";
-        t.inputEl.style.fontFamily = "var(--font-monospace)";
-        t.inputEl.style.fontSize = "0.85em";
-        t.setPlaceholder("eyJhbGciOi...").onChange((v) => (this.tokenInput = v));
-      });
-
-    new Setting(el).addButton((btn) =>
-      btn
-        .setButtonText("저장 및 검증")
-        .setCta()
-        .onClick(async () => {
-          if (!this.tokenInput.trim()) {
-            new Notice("토큰을 입력해 주세요.");
-            return;
-          }
-          btn.setDisabled(true).setButtonText("검증 중...");
-          try {
-            await this.plugin.saveToken(this.tokenInput);
-            this.tokenInput = "";
-            new Notice("토큰 검증 성공: 로그인됨");
-            this.display();
-          } catch (e) {
-            new Notice(this.errMsg(e));
-            btn.setDisabled(false).setButtonText("저장 및 검증");
-          }
-        })
-    );
-  }
-
   private errMsg(e: unknown): string {
     if (e instanceof PlaudAuthError || e instanceof PlaudApiError) return e.message;
-    return "알 수 없는 오류가 발생했습니다.";
+    return e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.";
   }
 }

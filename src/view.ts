@@ -1,6 +1,6 @@
 import { App, FuzzySuggestModal, ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type A4PPlaudPlugin from "./main";
-import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError, renameRecording } from "./api";
+import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
@@ -344,7 +344,7 @@ export class PlaudListView extends ItemView {
     if (this.loading) return;
     const token = this.plugin.getToken();
     if (!token) {
-      this.setStatus("로그인되지 않았습니다. 설정에서 토큰을 입력해 주세요.");
+      this.setStatus("로그인되지 않았습니다. 설정에서 'Plaud 로그인'을 해주세요.");
       this.recordings = [];
       this.applyFilter();
       return;
@@ -623,11 +623,6 @@ class PlaudDetailModal extends Modal {
         this.close();
       });
 
-      const renameBtn = bar.createEl("button", { text: "✏️ 이름 변경" });
-      renameBtn.addEventListener("click", () => {
-        this.showRenameInline(parent, bar, existing, detail);
-      });
-
       const info = bar.createSpan({ text: `이미 임포트됨: ${existing.path}` });
       info.style.fontSize = "0.85em";
       info.style.color = "var(--text-muted)";
@@ -637,12 +632,6 @@ class PlaudDetailModal extends Modal {
 
     const importBtn = bar.createEl("button", { text: "노트로 가져오기" });
     importBtn.addClass("mod-cta");
-
-    // 미임포트 녹음도 Plaud 서버 이름은 변경 가능
-    const renameBtn = bar.createEl("button", { text: "✏️ 이름 변경" });
-    renameBtn.addEventListener("click", () => {
-      this.showRenameInline(parent, bar, null, detail);
-    });
 
     const tplRow = parent.createDiv();
     tplRow.style.display = "flex";
@@ -677,8 +666,7 @@ class PlaudDetailModal extends Modal {
       importBtn.setAttr("disabled", "true");
       importBtn.setText("가져오는 중...");
       try {
-        const token = this.plugin.getToken();
-        const region = token?.region ?? "us";
+        const region = "";
         const tplPath = tplInput.value.trim();
         // STT 결과가 캐시에 있으면 transcript 자리에 사용
         const stt = sttCache.get(detail.id);
@@ -700,126 +688,6 @@ class PlaudDetailModal extends Modal {
         importBtn.removeAttribute("disabled");
         importBtn.setText("노트로 가져오기");
       }
-    });
-  }
-
-  private showRenameInline(
-    parent: HTMLElement,
-    bar: HTMLElement,
-    file: TFile | null,
-    detail: PlaudRecordingDetail
-  ): void {
-    bar.empty();
-    bar.style.flexWrap = "wrap";
-
-    const label = bar.createSpan({ text: "새 이름:" });
-    label.style.alignSelf = "center";
-    label.style.fontSize = "0.88em";
-    label.style.color = "var(--text-muted)";
-
-    const input = bar.createEl("input", { type: "text" });
-    input.value = file?.basename ?? detail.filename ?? "";
-    input.style.flex = "1";
-    input.style.minWidth = "200px";
-
-    const saveBtn = bar.createEl("button", { text: "💾 저장" });
-    saveBtn.addClass("mod-cta");
-    const cancelBtn = bar.createEl("button", { text: "취소" });
-
-    const hint = parent.createDiv();
-    hint.style.fontSize = "0.78em";
-    hint.style.color = "var(--text-muted)";
-    hint.style.marginBottom = "0.5em";
-    hint.setText(
-      file
-        ? "옵시디언 노트 이름 변경 → 모든 wikilink 자동 갱신. Plaud 서버에도 동기화 시도."
-        : "Plaud 서버의 녹음 이름만 변경합니다. (이 녹음은 옵시디언에 아직 임포트되지 않음)"
-    );
-
-    const restore = () => {
-      hint.remove();
-      bar.empty();
-      bar.style.flexWrap = "";
-      // 액션바를 처음 상태로 다시 렌더 (현재 부모 div에 또 createDiv하지 않도록 onOpen 사용)
-      this.onOpen();
-    };
-    cancelBtn.addEventListener("click", restore);
-
-    saveBtn.addEventListener("click", async () => {
-      const newName = input.value.trim();
-      if (!newName) {
-        new Notice("이름을 입력해 주세요.");
-        return;
-      }
-      const safeName = newName.replace(/[\\/:*?"<>|]+/g, "-").trim();
-
-      saveBtn.setAttr("disabled", "true");
-      saveBtn.setText("저장 중...");
-
-      // 1) 옵시디언 노트가 있으면 rename
-      if (file) {
-        if (safeName === file.basename) {
-          restore();
-          return;
-        }
-        const folder = file.parent?.path ?? "";
-        const newPath = folder ? `${folder}/${safeName}.md` : `${safeName}.md`;
-        if (this.app.vault.getAbstractFileByPath(newPath)) {
-          new Notice("같은 이름의 노트가 이미 있습니다.");
-          saveBtn.removeAttribute("disabled");
-          saveBtn.setText("💾 저장");
-          return;
-        }
-        try {
-          await this.app.fileManager.renameFile(file, newPath);
-        } catch (e) {
-          new Notice(`옵시디언 이름 변경 실패: ${(e as Error).message ?? "unknown"}`);
-          saveBtn.removeAttribute("disabled");
-          saveBtn.setText("💾 저장");
-          return;
-        }
-      }
-
-      // 2) Plaud 서버 sync (best-effort)
-      const token = this.plugin.getToken();
-      let plaudOk = false;
-      let plaudErr: string | null = null;
-      if (token) {
-        try {
-          await renameRecording(token, detail.id, safeName);
-          plaudOk = true;
-        } catch (e) {
-          plaudErr = e instanceof Error ? e.message : String(e);
-        }
-      } else {
-        plaudErr = "로그인되지 않음";
-      }
-
-      if (file) {
-        new Notice(
-          plaudOk
-            ? `✅ 이름 변경: ${safeName}\n옵시디언 + Plaud 동기화 완료`
-            : `옵시디언 이름은 변경됨.\nPlaud 동기화 실패: ${plaudErr}`
-        );
-        this.parentView?.notifyImported(detail.id, file);
-      } else {
-        new Notice(
-          plaudOk
-            ? `✅ Plaud 서버 이름 변경: ${safeName}`
-            : `Plaud 이름 변경 실패: ${plaudErr}`
-        );
-        // 사이드패널 목록을 새로 받아 카드 라벨 갱신
-        if (plaudOk && this.parentView) void this.parentView.reload();
-      }
-
-      this.onOpen();
-    });
-
-    input.focus();
-    input.select();
-    input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") saveBtn.click();
-      if (ev.key === "Escape") restore();
     });
   }
 
