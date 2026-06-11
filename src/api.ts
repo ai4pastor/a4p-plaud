@@ -1,3 +1,4 @@
+import { Notice } from "obsidian";
 import {
   PlaudRecording,
   PlaudRecordingDetail,
@@ -5,7 +6,13 @@ import {
   PlaudTokenData,
   PlaudUserInfo,
 } from "./types";
-import { mcpToolCall, PlaudMcpError } from "./mcp";
+import {
+  fileIdArgName,
+  mcpEnsureToolSchemas,
+  mcpToolCall,
+  McpToolResult,
+  PlaudMcpError,
+} from "./mcp";
 
 /**
  * 기존 api.plaud.ai 직접 호출을 공식 MCP 도구 호출로 대체한 어댑터.
@@ -121,6 +128,68 @@ function wrapMcpError(e: unknown): never {
   throw new PlaudApiError("UNKNOWN", e instanceof Error ? e.message : "알 수 없는 오류");
 }
 
+// ─────────────────────────────────────────── 파일 ID 인자명 자가 적응
+
+/** 인자명 검증 실패로 보이는 에러인지 (pydantic 류 메시지) */
+function looksLikeArgError(e: unknown): boolean {
+  if (!(e instanceof PlaudMcpError) || e.code !== "RPC_ERROR") return false;
+  return /field required|input should|unexpected keyword|missing|invalid params|validation/i.test(
+    e.message
+  );
+}
+
+const ID_ARG_CANDIDATES = ["file_id", "fileId", "id", "recording_id"];
+/** 도구별로 성공이 확인된 인자명 캐시 */
+const resolvedIdArg: Map<string, string> = new Map();
+
+/**
+ * 파일 ID 하나를 받는 도구를 인자명 모른 채 호출한다.
+ * tools/list 스키마 → 캐시 → 후보 순회 순서로 자가 적응.
+ */
+async function callWithFileId(
+  token: PlaudTokenData,
+  tool: string,
+  id: string
+): Promise<McpToolResult> {
+  const tried = new Set<string>();
+  const candidates: string[] = [];
+
+  const cached = resolvedIdArg.get(tool);
+  if (cached) candidates.push(cached);
+
+  await mcpEnsureToolSchemas(token);
+  const fromSchema = fileIdArgName(tool);
+  if (fromSchema && !candidates.includes(fromSchema)) candidates.push(fromSchema);
+
+  for (const c of ID_ARG_CANDIDATES) {
+    if (!candidates.includes(c)) candidates.push(c);
+  }
+
+  let lastErr: unknown = null;
+  for (const argName of candidates) {
+    if (tried.has(argName)) continue;
+    tried.add(argName);
+    try {
+      const res = await mcpToolCall(token, tool, { [argName]: id });
+      if (resolvedIdArg.get(tool) !== argName) {
+        resolvedIdArg.set(tool, argName);
+        console.log(`[A4P Plaud] ${tool} 인자명 확정: ${argName}`);
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (looksLikeArgError(e)) {
+        console.warn(`[A4P Plaud] ${tool} 인자명 '${argName}' 거부 — 다음 후보 시도`, (e as Error).message);
+        continue;
+      }
+      throw e; // 인자명 문제가 아니면 그대로 전파
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new PlaudMcpError("RPC_ERROR", `${tool} 호출 실패 (모든 인자명 후보 거부)`);
+}
+
 // ─────────────────────────────────────────── 공개 API (기존 시그니처 유지)
 
 export async function getUserInfo(
@@ -193,58 +262,154 @@ export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecord
   }
 }
 
-function extractTranscript(json: unknown): string {
-  if (typeof json === "string") return json;
-  const o = obj(json);
-  const direct = firstString(o, ["transcript", "text", "content", "full_text", "plain_text"]);
-  if (direct) return direct;
-  // 세그먼트(화자/타임스탬프) 배열 조합
-  const segs =
-    (Array.isArray(o.segments) && o.segments) ||
-    (Array.isArray(o.transcript) && o.transcript) ||
-    (Array.isArray(o.data) && o.data) ||
-    null;
-  if (segs) {
-    const lines: string[] = [];
-    for (const s of segs as Record<string, unknown>[]) {
-      const speaker = firstString(s, ["speaker", "speaker_name", "role"]);
-      const text = firstString(s, ["text", "content", "sentence"]) ?? "";
-      if (!text) continue;
-      lines.push(speaker ? `${speaker}: ${text}` : text);
+/**
+ * 문자열이 JSON으로 또 감싸여 있으면 반복적으로 풀어낸다 (이중/삼중 인코딩 대응).
+ * 실측: get_transcript의 data_content는 "[{\"content\":...}]" 처럼 문자열로 감싸인 세그먼트 배열.
+ */
+function deepParse(v: unknown, depth = 3): unknown {
+  let cur = v;
+  for (let i = 0; i < depth && typeof cur === "string"; i++) {
+    const t = cur.trim();
+    if (!t.startsWith("{") && !t.startsWith("[")) break;
+    try {
+      cur = JSON.parse(t);
+    } catch {
+      break;
     }
-    if (lines.length) return lines.join("\n");
   }
+  return cur;
+}
+
+/**
+ * 본문 내 단독 `---` 수평선을 `***`로 치환 (마크다운 렌더링 동일).
+ * import.ts의 중복 frontmatter 제거 안전망이 `---`를 yaml 구분자로 오인해
+ * 사이 내용을 삭제하는 것을 방지한다.
+ */
+function neutralizeHr(s: string): string {
+  return s.replace(/^[ \t]*-{3,}[ \t]*$/gm, "***");
+}
+
+/**
+ * AI 요약 본문 안의 `[mm:ss]`/`[h:mm:ss]` 타임스탬프 제거 (텍스트만 남김).
+ * 트랜스크립트 섹션의 타임스탬프는 유지하므로 요약 추출에만 사용한다.
+ */
+function stripTimestamps(s: string): string {
+  return s
+    // 타임스탬프만 있는 줄 제거
+    .replace(/^[ \t]*\[\d{1,2}:\d{2}(?::\d{2})?\][ \t]*\r?\n/gm, "")
+    // 줄 앞머리에 붙은 타임스탬프 제거
+    .replace(/^[ \t]*\[\d{1,2}:\d{2}(?::\d{2})?\][ \t]*/gm, "");
+}
+
+/** ms → "m:ss" 또는 "h:mm:ss" */
+function msToClock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/** {content, start_time, end_time, speaker} 형태의 세그먼트 배열인지 */
+function looksLikeSegments(arr: unknown[]): arr is Record<string, unknown>[] {
+  if (arr.length === 0) return false;
+  const first = obj(arr[0]);
+  const hasText = typeof (first.content ?? first.text ?? first.sentence) === "string";
+  const hasTime = first.start_time !== undefined || first.end_time !== undefined;
+  return hasText && hasTime;
+}
+
+/** 세그먼트 배열 → "[m:ss] (화자) 내용" 줄들 */
+function formatSegments(segs: Record<string, unknown>[]): string {
+  const lines: string[] = [];
+  for (const s of segs) {
+    const text = firstString(s, ["content", "text", "sentence"]);
+    if (!text || !text.trim()) continue;
+    const startMs = firstNumber(s, ["start_time", "start", "begin"]);
+    const speaker = firstString(s, ["speaker", "speaker_name", "original_speaker", "role"]);
+    const stamp = startMs !== undefined ? `[${msToClock(startMs)}] ` : "";
+    lines.push(`${stamp}${speaker ? `${speaker}: ` : ""}${text.trim()}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * 전사 추출. 실측 구조:
+ * [{ data_id, data_type, data_content: "<세그먼트 JSON 문자열>" }, ...]
+ * 세그먼트: { content, start_time(ms), end_time(ms), speaker }
+ */
+function extractTranscript(input: unknown): string {
+  const parsed = deepParse(input);
+  if (typeof parsed === "string") return neutralizeHr(parsed.trim());
+
+  if (Array.isArray(parsed)) {
+    if (looksLikeSegments(parsed)) return formatSegments(parsed);
+    // data 아이템 배열 — data_content 안의 진짜 내용을 꺼낸다
+    const parts: string[] = [];
+    for (const item of parsed) {
+      const o = obj(item);
+      const inner = deepParse(o.data_content ?? o.content ?? o.text);
+      if (Array.isArray(inner) && looksLikeSegments(inner)) {
+        parts.push(formatSegments(inner));
+      } else if (typeof inner === "string" && inner.trim()) {
+        parts.push(neutralizeHr(inner.trim()));
+      }
+    }
+    if (parts.length) return parts.join("\n\n");
+    return "";
+  }
+
+  const o = obj(parsed);
+  const direct = o.transcript ?? o.text ?? o.content ?? o.full_text ?? o.plain_text ?? o.data_content;
+  if (direct !== undefined) {
+    const inner = deepParse(direct);
+    if (Array.isArray(inner) && looksLikeSegments(inner)) return formatSegments(inner);
+    if (typeof inner === "string" && inner.trim()) return neutralizeHr(inner.trim());
+  }
+  const segs = o.segments ?? o.data;
+  if (Array.isArray(segs) && looksLikeSegments(segs)) return formatSegments(segs);
   return "";
 }
 
-function extractSummary(json: unknown): string | undefined {
-  if (typeof json === "string") return json || undefined;
-  const o = obj(json);
-  const note = obj(o.note ?? o.data ?? o);
-  const summary = firstString(note, ["summary", "ai_summary", "content", "text", "overview"]);
-  const actions = note.action_items ?? note.actions ?? note.todos;
-  let result = summary ?? "";
-  if (Array.isArray(actions) && actions.length) {
-    const items = (actions as unknown[])
-      .map((a) => (typeof a === "string" ? a : firstString(obj(a), ["text", "content", "title"]) ?? ""))
-      .filter(Boolean);
-    if (items.length) {
-      result += (result ? "\n\n" : "") + "### Action Items\n" + items.map((i) => `- ${i}`).join("\n");
+/**
+ * 요약 추출. 실측 구조:
+ * [{ data_type: "auto_sum_note", data_title: "Summary", data_content: "### 마크다운...", ... }]
+ */
+function extractSummary(input: unknown): string | undefined {
+  const parsed = deepParse(input);
+  if (typeof parsed === "string") return stripTimestamps(neutralizeHr(parsed.trim())) || undefined;
+
+  const items = Array.isArray(parsed) ? parsed : [obj(parsed).note ?? obj(parsed).data ?? parsed];
+  const parts: string[] = [];
+  for (const it of items) {
+    const o = obj(it);
+    const content = firstString(o, ["data_content", "summary", "ai_summary", "content", "text", "overview"]);
+    if (content && content.trim()) parts.push(stripTimestamps(neutralizeHr(content.trim())));
+    const actions = o.action_items ?? o.actions ?? o.todos;
+    if (Array.isArray(actions) && actions.length) {
+      const lines = (actions as unknown[])
+        .map((a) => (typeof a === "string" ? a : firstString(obj(a), ["text", "content", "title"]) ?? ""))
+        .filter(Boolean);
+      if (lines.length) parts.push("### Action Items\n" + lines.map((l) => `- ${l}`).join("\n"));
     }
   }
-  return result || undefined;
+  return parts.join("\n\n") || undefined;
 }
 
 let loggedDetailSample = false;
+let loggedTranscriptSample = false;
+let loggedNoteSample = false;
+let notifiedTranscriptError = false;
 
 export async function getRecordingDetail(
   token: PlaudTokenData,
   id: string
 ): Promise<PlaudRecordingDetail> {
   try {
-    const fileRes = await mcpToolCall(token, "get_file", { file_id: id });
+    const fileRes = await callWithFileId(token, "get_file", id);
     if (!loggedDetailSample) {
-      console.log("[A4P Plaud] get_file raw (필드 매핑 확인용)", fileRes.json);
+      console.log("[A4P Plaud] get_file raw (필드 매핑 확인용)", fileRes.json ?? fileRes.text);
       loggedDetailSample = true;
     }
     const fileObj = obj((fileRes.json as Record<string, unknown>)?.file ?? fileRes.json);
@@ -262,21 +427,41 @@ export async function getRecordingDetail(
 
     let transcript = "";
     try {
-      const tr = await mcpToolCall(token, "get_transcript", { file_id: id });
+      const tr = await callWithFileId(token, "get_transcript", id);
+      if (!loggedTranscriptSample) {
+        console.log("[A4P Plaud] get_transcript raw (필드 매핑 확인용)", tr.json ?? tr.text.slice(0, 800));
+        loggedTranscriptSample = true;
+      }
       transcript = extractTranscript(tr.json ?? tr.text);
+      // 구조 추출 실패 시 raw 텍스트 폴백 (마크다운/평문 전사 대응)
+      if (!transcript && tr.text.trim()) {
+        transcript = tr.text.trim();
+      }
     } catch (e) {
-      console.warn("[A4P Plaud] get_transcript 실패(무시)", e);
+      console.error("[A4P Plaud] get_transcript 실패", e);
+      if (!notifiedTranscriptError) {
+        notifiedTranscriptError = true;
+        const msg = e instanceof Error ? e.message : String(e);
+        new Notice(`Plaud 전사 불러오기 실패: ${msg}\n(콘솔 로그를 확인해 주세요)`);
+      }
     }
 
     let summary: string | undefined;
     try {
-      const note = await mcpToolCall(token, "get_note", { file_id: id });
+      const note = await callWithFileId(token, "get_note", id);
+      if (!loggedNoteSample) {
+        console.log("[A4P Plaud] get_note raw (필드 매핑 확인용)", note.json ?? note.text.slice(0, 800));
+        loggedNoteSample = true;
+      }
       summary = extractSummary(note.json ?? note.text);
+      if (!summary && note.text.trim()) {
+        summary = note.text.trim();
+      }
     } catch (e) {
       console.warn("[A4P Plaud] get_note 실패(무시)", e);
     }
 
-    return { ...base, transcript, summary };
+    return { ...base, transcript, summary, is_trans: base.is_trans || !!transcript };
   } catch (e) {
     wrapMcpError(e);
   }
@@ -284,7 +469,7 @@ export async function getRecordingDetail(
 
 export async function getMp3Url(token: PlaudTokenData, id: string): Promise<string | null> {
   try {
-    const { json } = await mcpToolCall(token, "get_file", { file_id: id });
+    const { json } = await callWithFileId(token, "get_file", id);
     const o = obj((json as Record<string, unknown>)?.file ?? json);
     const url = firstString(o, [
       "download_url",

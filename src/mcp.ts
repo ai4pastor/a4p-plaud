@@ -31,11 +31,14 @@ const PROTOCOL_VERSION = "2025-06-18";
 let sessionId: string | null = null;
 let initialized = false;
 let rpcCounter = 0;
+/** tools/list 로 받은 도구별 inputSchema 캐시 */
+let toolSchemas: Map<string, Record<string, unknown>> | null = null;
 
 /** 세션 상태 초기화 (로그아웃·토큰 교체 시) */
 export function resetMcpSession(): void {
   sessionId = null;
   initialized = false;
+  toolSchemas = null;
 }
 
 interface RpcResponse {
@@ -188,7 +191,48 @@ export async function mcpListTools(token: PlaudTokenData): Promise<Record<string
   await ensureSession(token);
   const { result } = await rpc(token, "tools/list", {});
   console.log("[A4P Plaud] MCP tools/list", result);
+  cacheToolSchemas(result);
   return result;
+}
+
+function cacheToolSchemas(listResult: Record<string, unknown>): void {
+  const tools = listResult.tools as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(tools)) return;
+  toolSchemas = new Map();
+  for (const t of tools) {
+    const name = t.name as string | undefined;
+    const schema = (t.inputSchema ?? t.input_schema) as Record<string, unknown> | undefined;
+    if (name && schema) toolSchemas.set(name, schema);
+  }
+}
+
+/** tools/list 1회 호출로 스키마 캐시 확보 (이미 있으면 재사용). 실패해도 throw하지 않음. */
+export async function mcpEnsureToolSchemas(token: PlaudTokenData): Promise<void> {
+  if (toolSchemas) return;
+  try {
+    await ensureSession(token);
+    const { result } = await rpc(token, "tools/list", {});
+    cacheToolSchemas(result);
+  } catch (e) {
+    console.warn("[A4P Plaud] tools/list 스키마 캐시 실패(무시)", e);
+  }
+}
+
+/**
+ * 도구 inputSchema에서 파일 ID에 해당하는 인자명을 찾는다.
+ * required 중 'id' 포함 속성 우선, 없으면 전체 속성에서 탐색. 못 찾으면 null.
+ */
+export function fileIdArgName(toolName: string): string | null {
+  const schema = toolSchemas?.get(toolName);
+  if (!schema) return null;
+  const props = schema.properties as Record<string, unknown> | undefined;
+  if (!props) return null;
+  const names = Object.keys(props);
+  const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
+  const isIdLike = (n: string) => /(^|_)id$|^id$|Id$/.test(n) || n.toLowerCase().includes("file");
+  const fromRequired = required.find(isIdLike);
+  if (fromRequired) return fromRequired;
+  return names.find(isIdLike) ?? null;
 }
 
 export interface McpToolResult {
@@ -210,10 +254,11 @@ export async function mcpToolCall(
   await ensureSession(tokenData);
   const { result, token } = await rpc(tokenData, "tools/call", { name, arguments: args });
 
-  const content = (result.content as Array<{ type?: string; text?: string }> | undefined) ?? [];
+  const content =
+    (result.content as Array<{ type?: string; text?: string; resource?: { text?: string } }> | undefined) ?? [];
   const text = content
-    .filter((c) => typeof c.text === "string")
-    .map((c) => c.text as string)
+    .map((c) => (typeof c.text === "string" ? c.text : c.resource?.text ?? ""))
+    .filter(Boolean)
     .join("");
 
   let json: unknown = null;

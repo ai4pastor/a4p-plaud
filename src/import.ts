@@ -1,6 +1,6 @@
 import { App, TFile, normalizePath } from "obsidian";
 import { PlaudRecordingDetail, PlaudRegion, SttResult } from "./types";
-import { formatDuration, formatStartTime, formatStartTimeForFilename } from "./format";
+import { formatDuration, formatStartTime } from "./format";
 
 export function findNoteByPlaudId(app: App, plaudId: string): TFile | null {
   for (const f of app.vault.getMarkdownFiles()) {
@@ -20,9 +20,8 @@ function sanitizeFilename(name: string): string {
 }
 
 function buildFilePath(folder: string, detail: PlaudRecordingDetail): string {
-  const stamp = formatStartTimeForFilename(detail.start_time);
   const title = sanitizeFilename(detail.filename || detail.id);
-  const base = `${stamp} ${title}`.trim() || detail.id;
+  const base = title || detail.id;
   return normalizePath(`${folder}/${base}.md`);
 }
 
@@ -89,18 +88,15 @@ function buildDefaultContent(
   fmLines.push(`tags:`, `  - plaud`, "---", "");
   const fm = fmLines.join("\n");
 
-  const body = [
-    `> [!info] Plaud 원본`,
-    `> id: \`${vars.plaud_id}\``,
-    `> 길이: ${vars.duration}  ·  녹음일: ${vars.date}`,
-    "",
-  ];
+  const body: string[] = [];
   if (vars.summary.trim()) {
+    // AI 요약(정제된 전체 전사 포함)이 있으면 타임스탬프 트랜스크립트는 생략
     body.push("## AI 요약", "", vars.summary.trim(), "");
+  } else {
+    body.push("## 트랜스크립트", "");
+    body.push(vars.transcript.trim() || "전사된 트랜스크립트가 없습니다.");
+    body.push("");
   }
-  body.push("## 트랜스크립트", "");
-  body.push(vars.transcript.trim() || "전사된 트랜스크립트가 없습니다.");
-  body.push("");
 
   return fm + body.join("\n");
 }
