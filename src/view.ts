@@ -1,6 +1,16 @@
-import { App, FuzzySuggestModal, ItemView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import {
+  App,
+  Component,
+  FuzzySuggestModal,
+  ItemView,
+  MarkdownRenderer,
+  Modal,
+  Notice,
+  TFile,
+  WorkspaceLeaf,
+} from "obsidian";
 import type A4PPlaudPlugin from "./main";
-import { getMp3Url, getRecordingDetail, listRecordings, PlaudApiError } from "./api";
+import { getMp3Url, getRecordingDetail, listRecordings, msToClock, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
@@ -36,6 +46,8 @@ export class PlaudListView extends ItemView {
   private highlightedCardEl: HTMLElement | null = null;
   private sortOrder: "desc" | "asc" = "desc";
   private sortBtnEl: HTMLButtonElement | null = null;
+  private batchBtnEl: HTMLButtonElement | null = null;
+  private batchRunning = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: A4PPlaudPlugin) {
     super(leaf);
@@ -81,6 +93,12 @@ export class PlaudListView extends ItemView {
     refresh.title = "새로고침";
     refresh.addEventListener("click", () => this.reload());
 
+    const batchBtn = toolbar.createEl("button", { text: "" });
+    batchBtn.title = "미임포트 녹음 모두 가져오기";
+    batchBtn.style.display = "none";
+    batchBtn.addEventListener("click", () => void this.importAllMissing());
+    this.batchBtnEl = batchBtn;
+
     this.playerContainer = root.createDiv({ cls: "a4p-plaud-player" });
     this.playerContainer.style.borderBottom = "1px solid var(--background-modifier-border)";
     this.playerContainer.style.padding = "8px";
@@ -116,6 +134,22 @@ export class PlaudListView extends ItemView {
     );
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => this.refreshPlayerFromFile(file))
+    );
+    // 임포트된 노트가 삭제되면 카드 상태를 즉시 "미임포트"로 되돌린다 (재임포트 가능)
+    this.registerEvent(
+      this.app.vault.on("delete", (af) => {
+        let changed = false;
+        for (const [id, f] of this.plaudIdIndex) {
+          if (f.path === af.path) {
+            this.plaudIdIndex.delete(id);
+            changed = true;
+          }
+        }
+        if (changed) {
+          this.renderList();
+          this.updateBatchBadge();
+        }
+      })
     );
 
     await this.reload();
@@ -328,6 +362,109 @@ export class PlaudListView extends ItemView {
     await this.loadAndPlay(id, lastTime);
   }
 
+  /** 현재 오디오가 재생 중인지 */
+  isAudioPlaying(): boolean {
+    return !!this.audioEl && !!this.audioEl.src && !this.audioEl.paused;
+  }
+
+  /** 재생 중이면 일시정지, 멈춰 있으면 재개. 토글 후 재생 상태를 반환. */
+  togglePlayPause(): boolean {
+    if (!this.audioEl || !this.audioEl.src) return false;
+    if (this.audioEl.paused) {
+      void this.audioEl.play().catch(() => {
+        // user gesture issue — ignore
+      });
+      return true;
+    }
+    this.audioEl.pause();
+    return false;
+  }
+
+  /** 타임스탬프 점프 — 해당 녹음을 지정 위치(초)부터 재생. 모달·노트 post-processor에서 호출. */
+  async playAt(id: string, seconds: number): Promise<void> {
+    this.setPlayerForId(id);
+    if (!this.audioEl) return;
+    if (this.audioEl.src && this.currentPlaudId === id) {
+      this.audioEl.currentTime = seconds;
+      try {
+        await this.audioEl.play();
+      } catch {
+        // user gesture issue — ignore
+      }
+      return;
+    }
+    await this.loadAndPlay(id, seconds);
+  }
+
+  /** 미임포트 녹음 수 배지 갱신 */
+  private updateBatchBadge(): void {
+    const btn = this.batchBtnEl;
+    if (!btn) return;
+    const missing = this.recordings.filter((r) => !this.plaudIdIndex.has(r.id)).length;
+    if (missing > 0 && !this.batchRunning) {
+      btn.style.display = "";
+      btn.setText(`⬇ ${missing}`);
+      btn.title = `미임포트 녹음 ${missing}개 모두 가져오기`;
+    } else {
+      btn.style.display = "none";
+    }
+  }
+
+  /** 미임포트 녹음 일괄 임포트 (순차, 진행 상태 표시) */
+  private async importAllMissing(): Promise<void> {
+    if (this.batchRunning) return;
+    const token = this.plugin.getToken();
+    if (!token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    const missing = this.recordings.filter((r) => !this.plaudIdIndex.has(r.id));
+    if (missing.length === 0) {
+      new Notice("미임포트 녹음이 없습니다.");
+      return;
+    }
+    const tplNote = this.plugin.settings.templatePath
+      ? "\n(설정된 Templater 템플릿이 각 노트에 적용됩니다)"
+      : "";
+    if (!window.confirm(`미임포트 녹음 ${missing.length}개를 모두 노트로 가져올까요?${tplNote}`)) {
+      return;
+    }
+
+    this.batchRunning = true;
+    this.updateBatchBadge();
+    let ok = 0;
+    let fail = 0;
+    try {
+      for (let i = 0; i < missing.length; i++) {
+        const rec = missing[i];
+        const progress = `Plaud 일괄 임포트 ${i + 1}/${missing.length}`;
+        this.plugin.setStatusBar(progress);
+        this.setStatus(`${progress}: ${rec.filename}`);
+        try {
+          const tok = this.plugin.getToken();
+          if (!tok) throw new Error("로그인 세션이 끊어졌습니다.");
+          const detail = await getRecordingDetail(tok, rec.id);
+          const { file } = await importRecording(this.app, detail, "", this.plugin.settings.importFolder, {
+            templatePath: this.plugin.settings.templatePath || undefined,
+            autoBibleWikilink: this.plugin.settings.autoBibleWikilink,
+          });
+          this.plaudIdIndex.set(rec.id, file);
+          ok++;
+        } catch (e) {
+          fail++;
+          console.error("[A4P Plaud] 일괄 임포트 실패", rec.id, e);
+        }
+        // 서버 부하 완화
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    } finally {
+      this.batchRunning = false;
+      this.plugin.setStatusBar("");
+    }
+    new Notice(`일괄 임포트 완료: 성공 ${ok}개${fail ? `, 실패 ${fail}개` : ""}`);
+    this.applyFilter();
+  }
+
   private sortLabel(): string {
     return this.sortOrder === "desc" ? "↓ 최신순" : "↑ 오래된순";
   }
@@ -382,6 +519,7 @@ export class PlaudListView extends ItemView {
   notifyImported(plaudId: string, file: TFile): void {
     this.plaudIdIndex.set(plaudId, file);
     this.renderList();
+    this.updateBatchBadge();
   }
 
   private applyFilter(): void {
@@ -397,6 +535,7 @@ export class PlaudListView extends ItemView {
     }
     this.refreshStatus();
     this.renderList();
+    this.updateBatchBadge();
   }
 
   private refreshStatus(): void {
@@ -509,6 +648,10 @@ class PlaudDetailModal extends Modal {
   plugin: A4PPlaudPlugin;
   recording: PlaudRecording;
   parentView: PlaudListView | null;
+  /** MarkdownRenderer 수명 관리용 */
+  private mdComponent: Component | null = null;
+  /** 재생 상태 라벨 갱신 타이머들 (onOpen 재호출·닫기 시 정리) */
+  private labelTimers: number[] = [];
 
   constructor(
     app: PlaudListView["app"],
@@ -526,6 +669,11 @@ class PlaudDetailModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.style.width = "min(800px, 90vw)";
+    this.mdComponent?.unload();
+    this.mdComponent = new Component();
+    this.mdComponent.load();
+    for (const t of this.labelTimers) window.clearInterval(t);
+    this.labelTimers = [];
 
     contentEl.createEl("h3", { text: this.recording.filename });
 
@@ -573,17 +721,52 @@ class PlaudDetailModal extends Modal {
       if (detail.summary) {
         contentEl.createEl("h4", { text: "AI 요약" });
         const sum = contentEl.createDiv();
-        sum.style.whiteSpace = "pre-wrap";
         sum.style.marginBottom = "1em";
         sum.style.userSelect = "text";
         sum.style.cursor = "text";
-        sum.setText(detail.summary);
+        sum.style.maxHeight = "40vh";
+        sum.style.overflowY = "auto";
+        sum.style.padding = "0 8px";
+        if (this.mdComponent) {
+          await MarkdownRenderer.render(this.app, detail.summary, sum, "", this.mdComponent);
+        } else {
+          sum.style.whiteSpace = "pre-wrap";
+          sum.setText(detail.summary);
+        }
       }
 
       // STT 영역: 전사 안 됐고 캐시도 없을 때 버튼, 캐시 있으면 결과 표시
       this.renderSttSection(contentEl, detail);
 
       contentEl.createEl("h4", { text: "트랜스크립트" });
+      if (detail.segments && detail.segments.length > 0) {
+        const hintRow = contentEl.createDiv();
+        hintRow.style.display = "flex";
+        hintRow.style.alignItems = "center";
+        hintRow.style.gap = "8px";
+        hintRow.style.marginBottom = "0.4em";
+
+        const hint = hintRow.createSpan();
+        hint.style.fontSize = "0.82em";
+        hint.style.color = "var(--text-muted)";
+        hint.setText("⏯ 시간을 클릭하면 해당 위치부터 재생합니다.");
+
+        const pauseBtn = hintRow.createEl("button");
+        pauseBtn.style.fontSize = "0.82em";
+        pauseBtn.style.padding = "2px 10px";
+        const refreshLabel = () => {
+          pauseBtn.setText(this.parentView?.isAudioPlaying() ? "⏸ 일시정지" : "▶ 재생");
+        };
+        refreshLabel();
+        pauseBtn.addEventListener("click", () => {
+          const playing = this.parentView?.togglePlayPause() ?? false;
+          pauseBtn.setText(playing ? "⏸ 일시정지" : "▶ 재생");
+        });
+        // 타임스탬프 클릭으로 재생이 시작돼도 라벨이 따라오도록 주기 갱신
+        const labelTimer = window.setInterval(refreshLabel, 500);
+        this.scope.register([], "Escape", () => window.clearInterval(labelTimer));
+        this.labelTimers.push(labelTimer);
+      }
       const tr = contentEl.createDiv();
       tr.style.maxHeight = "50vh";
       tr.style.overflowY = "auto";
@@ -595,10 +778,27 @@ class PlaudDetailModal extends Modal {
       tr.style.userSelect = "text";
       tr.style.cursor = "text";
       const cached = sttCache.get(detail.id);
-      const displayText =
-        detail.transcript ||
-        (cached ? cached.text : "전사된 트랜스크립트가 없습니다.");
-      tr.setText(displayText);
+      if (detail.segments && detail.segments.length > 0) {
+        // 타임스탬프 클릭 → 사이드패널 플레이어가 그 위치부터 재생
+        for (const seg of detail.segments) {
+          const line = tr.createDiv();
+          line.style.marginBottom = "0.35em";
+          const ts = line.createSpan({
+            text: `[${msToClock(seg.start_time)}]`,
+            cls: "a4p-plaud-ts-link",
+          });
+          ts.title = "이 위치부터 재생";
+          ts.addEventListener("click", () => {
+            void this.parentView?.playAt(detail.id, seg.start_time / 1000);
+          });
+          const prefix = seg.speaker ? ` ${seg.speaker}: ` : " ";
+          line.createSpan({ text: `${prefix}${seg.content}` });
+        }
+      } else {
+        tr.setText(
+          detail.transcript || (cached ? cached.text : "전사된 트랜스크립트가 없습니다.")
+        );
+      }
     } catch (e) {
       const msg =
         e instanceof PlaudApiError || e instanceof PlaudAuthError
@@ -677,7 +877,11 @@ class PlaudDetailModal extends Modal {
           effective,
           region,
           this.plugin.settings.importFolder,
-          { templatePath: tplPath || undefined, stt: stt ?? undefined }
+          {
+            templatePath: tplPath || undefined,
+            stt: stt ?? undefined,
+            autoBibleWikilink: this.plugin.settings.autoBibleWikilink,
+          }
         );
         new Notice(existed ? "이미 임포트된 녹음입니다." : `노트 생성: ${file.path}`);
         this.parentView?.notifyImported(detail.id, file);
@@ -844,6 +1048,10 @@ class PlaudDetailModal extends Modal {
   }
 
   onClose(): void {
+    for (const t of this.labelTimers) window.clearInterval(t);
+    this.labelTimers = [];
+    this.mdComponent?.unload();
+    this.mdComponent = null;
     this.contentEl.empty();
   }
 }

@@ -1,7 +1,8 @@
 import { Notice, ObsidianProtocolData, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { PlaudAuthError, isTokenExpired, isTokenNearExpiry } from "./auth";
-import { getUserInfo } from "./api";
+import { getRecordingDetail, getUserInfo } from "./api";
+import { resyncRecording } from "./import";
 import {
   buildAuthorizeUrl,
   createPkce,
@@ -83,10 +84,105 @@ export default class A4PPlaudPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "plaud-resync-note",
+      name: "현재 노트를 Plaud 최신 요약/전사로 갱신",
+      callback: () => void this.resyncActiveNote(),
+    });
+
+    this.addCommand({
       id: "plaud-mcp-list-tools",
       name: "Plaud MCP 도구 목록 콘솔 출력 (디버그)",
       callback: () => void this.debugListTools(),
     });
+
+    // 읽기 모드에서 plaud 노트의 [m:ss] 타임스탬프를 클릭 가능하게 — 클릭 시 그 위치 재생
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const fm = this.app.metadataCache.getCache(ctx.sourcePath)?.frontmatter;
+      const plaudId = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
+      if (!plaudId) return;
+      this.linkifyTimestampsIn(el, plaudId);
+    });
+  }
+
+  private linkifyTimestampsIn(root: HTMLElement, plaudId: string): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const targets: Text[] = [];
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const t = node as Text;
+      if (!/\[\d{1,2}:\d{2}(?::\d{2})?\]/.test(t.data)) continue;
+      // 코드 블록 안은 건드리지 않음
+      if (t.parentElement?.closest("code, pre")) continue;
+      targets.push(t);
+    }
+    for (const textNode of targets) {
+      const re = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g;
+      const data = textNode.data;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(data))) {
+        frag.appendChild(document.createTextNode(data.slice(last, m.index)));
+        const span = document.createElement("span");
+        span.textContent = m[0];
+        span.className = "a4p-plaud-ts-link";
+        span.title = "이 위치부터 재생";
+        const sec =
+          m[3] !== undefined
+            ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+            : Number(m[1]) * 60 + Number(m[2]);
+        span.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          void this.jumpToAudio(plaudId, sec);
+        });
+        frag.appendChild(span);
+        last = m.index + m[0].length;
+      }
+      frag.appendChild(document.createTextNode(data.slice(last)));
+      textNode.replaceWith(frag);
+    }
+  }
+
+  private async jumpToAudio(plaudId: string, seconds: number): Promise<void> {
+    await this.activateView();
+    const leaf = this.app.workspace.getLeavesOfType(PLAUD_VIEW_TYPE)[0];
+    const v = leaf?.view;
+    if (v instanceof PlaudListView) {
+      await v.playAt(plaudId, seconds);
+    }
+  }
+
+  private async resyncActiveNote(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice("활성 노트가 없습니다.");
+      return;
+    }
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const plaudId = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
+    if (!plaudId) {
+      new Notice("Plaud 노트가 아닙니다 (plaud_id frontmatter 없음).");
+      return;
+    }
+    if (!this.token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    new Notice("Plaud 서버에서 최신 요약/전사를 가져오는 중...");
+    try {
+      const detail = await getRecordingDetail(this.token, plaudId);
+      const { mode } = await resyncRecording(this.app, detail, file, {
+        autoBibleWikilink: this.settings.autoBibleWikilink,
+      });
+      new Notice(
+        mode === "replaced"
+          ? "✅ 노트 갱신 완료 (요약/전사 구간 교체)"
+          : "✅ 갱신 완료 — 구버전 노트라 본문 끝에 최신 내용을 추가했습니다."
+      );
+    } catch (e) {
+      console.error("[A4P Plaud] 노트 재동기화 실패", e);
+      new Notice(`갱신 실패: ${(e as Error).message ?? "unknown"}`);
+    }
   }
 
   private async debugListTools(): Promise<void> {

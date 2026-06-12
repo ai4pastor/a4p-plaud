@@ -4,6 +4,7 @@ import {
   PlaudRecordingDetail,
   PlaudRegion,
   PlaudTokenData,
+  PlaudTranscriptSegment,
   PlaudUserInfo,
 } from "./types";
 import {
@@ -263,6 +264,24 @@ export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecord
 }
 
 /**
+ * raw 텍스트 폴백용 — JSON(배열/객체)이 아닌 실제 산문/마크다운인지.
+ * "[]"·"{}"·구조화 JSON은 추출기가 이미 처리했으므로 폴백 대상이 아니다.
+ */
+function isProseText(s: string): boolean {
+  const t = (s ?? "").trim();
+  if (!t) return false;
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      JSON.parse(t);
+      return false; // 유효한 JSON — 내용이 아니라 구조
+    } catch {
+      return true; // JSON처럼 시작하지만 평문
+    }
+  }
+  return true;
+}
+
+/**
  * 문자열이 JSON으로 또 감싸여 있으면 반복적으로 풀어낸다 (이중/삼중 인코딩 대응).
  * 실측: get_transcript의 data_content는 "[{\"content\":...}]" 처럼 문자열로 감싸인 세그먼트 배열.
  */
@@ -302,7 +321,7 @@ function stripTimestamps(s: string): string {
 }
 
 /** ms → "m:ss" 또는 "h:mm:ss" */
-function msToClock(ms: number): string {
+export function msToClock(ms: number): string {
   const total = Math.floor(ms / 1000);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
@@ -334,42 +353,77 @@ function formatSegments(segs: Record<string, unknown>[]): string {
   return lines.join("\n");
 }
 
+function normalizeSegments(raw: Record<string, unknown>[]): PlaudTranscriptSegment[] {
+  const out: PlaudTranscriptSegment[] = [];
+  for (const s of raw) {
+    const content = firstString(s, ["content", "text", "sentence"]);
+    if (!content || !content.trim()) continue;
+    out.push({
+      content: content.trim(),
+      start_time: firstNumber(s, ["start_time", "start", "begin"]) ?? 0,
+      end_time: firstNumber(s, ["end_time", "end"]) ?? 0,
+      speaker: firstString(s, ["speaker", "speaker_name", "original_speaker", "role"]),
+    });
+  }
+  return out;
+}
+
+interface TranscriptData {
+  text: string;
+  segments: PlaudTranscriptSegment[] | null;
+}
+
 /**
  * 전사 추출. 실측 구조:
  * [{ data_id, data_type, data_content: "<세그먼트 JSON 문자열>" }, ...]
  * 세그먼트: { content, start_time(ms), end_time(ms), speaker }
+ * 타임스탬프 점프를 위해 평문과 세그먼트 배열을 함께 반환한다.
  */
-function extractTranscript(input: unknown): string {
+function extractTranscriptData(input: unknown): TranscriptData {
   const parsed = deepParse(input);
-  if (typeof parsed === "string") return neutralizeHr(parsed.trim());
+  if (typeof parsed === "string") {
+    return { text: neutralizeHr(parsed.trim()), segments: null };
+  }
 
   if (Array.isArray(parsed)) {
-    if (looksLikeSegments(parsed)) return formatSegments(parsed);
+    if (looksLikeSegments(parsed)) {
+      const segs = normalizeSegments(parsed);
+      return { text: formatSegments(parsed), segments: segs.length ? segs : null };
+    }
     // data 아이템 배열 — data_content 안의 진짜 내용을 꺼낸다
     const parts: string[] = [];
+    const allSegs: PlaudTranscriptSegment[] = [];
     for (const item of parsed) {
       const o = obj(item);
       const inner = deepParse(o.data_content ?? o.content ?? o.text);
       if (Array.isArray(inner) && looksLikeSegments(inner)) {
         parts.push(formatSegments(inner));
+        allSegs.push(...normalizeSegments(inner));
       } else if (typeof inner === "string" && inner.trim()) {
         parts.push(neutralizeHr(inner.trim()));
       }
     }
-    if (parts.length) return parts.join("\n\n");
-    return "";
+    return { text: parts.join("\n\n"), segments: allSegs.length ? allSegs : null };
   }
 
   const o = obj(parsed);
   const direct = o.transcript ?? o.text ?? o.content ?? o.full_text ?? o.plain_text ?? o.data_content;
   if (direct !== undefined) {
     const inner = deepParse(direct);
-    if (Array.isArray(inner) && looksLikeSegments(inner)) return formatSegments(inner);
-    if (typeof inner === "string" && inner.trim()) return neutralizeHr(inner.trim());
+    if (Array.isArray(inner) && looksLikeSegments(inner)) {
+      const segs = normalizeSegments(inner);
+      return { text: formatSegments(inner), segments: segs.length ? segs : null };
+    }
+    if (typeof inner === "string" && inner.trim()) {
+      return { text: neutralizeHr(inner.trim()), segments: null };
+    }
   }
   const segs = o.segments ?? o.data;
-  if (Array.isArray(segs) && looksLikeSegments(segs)) return formatSegments(segs);
-  return "";
+  if (Array.isArray(segs) && looksLikeSegments(segs)) {
+    const norm = normalizeSegments(segs);
+    return { text: formatSegments(segs), segments: norm.length ? norm : null };
+  }
+  return { text: "", segments: null };
 }
 
 /**
@@ -426,15 +480,19 @@ export async function getRecordingDetail(
     };
 
     let transcript = "";
+    let segments: PlaudTranscriptSegment[] | null = null;
     try {
       const tr = await callWithFileId(token, "get_transcript", id);
       if (!loggedTranscriptSample) {
         console.log("[A4P Plaud] get_transcript raw (필드 매핑 확인용)", tr.json ?? tr.text.slice(0, 800));
         loggedTranscriptSample = true;
       }
-      transcript = extractTranscript(tr.json ?? tr.text);
+      const data = extractTranscriptData(tr.json ?? tr.text);
+      transcript = data.text;
+      segments = data.segments;
       // 구조 추출 실패 시 raw 텍스트 폴백 (마크다운/평문 전사 대응)
-      if (!transcript && tr.text.trim()) {
+      // 단, "[]"/"{}" 같은 JSON 찌꺼기는 내용이 아님 — 전사 없음으로 둬야 STT 버튼이 뜬다
+      if (!transcript && isProseText(tr.text)) {
         transcript = tr.text.trim();
       }
     } catch (e) {
@@ -454,14 +512,20 @@ export async function getRecordingDetail(
         loggedNoteSample = true;
       }
       summary = extractSummary(note.json ?? note.text);
-      if (!summary && note.text.trim()) {
+      if (!summary && isProseText(note.text)) {
         summary = note.text.trim();
       }
     } catch (e) {
       console.warn("[A4P Plaud] get_note 실패(무시)", e);
     }
 
-    return { ...base, transcript, summary, is_trans: base.is_trans || !!transcript };
+    return {
+      ...base,
+      transcript,
+      summary,
+      segments: segments ?? undefined,
+      is_trans: base.is_trans || !!transcript,
+    };
   } catch (e) {
     wrapMcpError(e);
   }

@@ -58,6 +58,16 @@ export class PlaudSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "임포트" });
     new Setting(containerEl)
+      .setName("성경 구절 자동 wikilink")
+      .setDesc("노트로 가져올 때 본문의 성경 구절(예: 요한복음 3:16)을 [[요3_16]] 형태로 자동 변환합니다.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoBibleWikilink).onChange(async (v) => {
+          this.plugin.settings.autoBibleWikilink = v;
+          await this.plugin.persistSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("저장 폴더")
       .setDesc("Plaud 녹음을 노트로 가져올 때 사용할 vault 폴더입니다.")
       .addText((t) =>

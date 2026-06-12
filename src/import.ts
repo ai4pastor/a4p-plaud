@@ -1,6 +1,11 @@
 import { App, TFile, normalizePath } from "obsidian";
 import { PlaudRecordingDetail, PlaudRegion, SttResult } from "./types";
 import { formatDuration, formatStartTime } from "./format";
+import { convertBibleRefsInNote } from "./bible";
+
+/** 플러그인 소유 본문 구간 마커 — 재동기화 시 이 사이만 교체한다 */
+export const PLAUD_CONTENT_START = "<!-- plaud:content:start -->";
+export const PLAUD_CONTENT_END = "<!-- plaud:content:end -->";
 
 export function findNoteByPlaudId(app: App, plaudId: string): TFile | null {
   for (const f of app.vault.getMarkdownFiles()) {
@@ -88,17 +93,41 @@ function buildDefaultContent(
   fmLines.push(`tags:`, `  - plaud`, "---", "");
   const fm = fmLines.join("\n");
 
-  const body: string[] = [];
+  return fm + buildPlaudBody(detail, region, stt) + "\n";
+}
+
+/**
+ * 플러그인 소유 본문(마커로 감싼 요약/전사 구간).
+ * 신규 임포트와 재동기화가 같은 빌더를 쓴다.
+ * - 요약 있음: ## AI 요약 + 접힌 콜아웃 타임스탬프 트랜스크립트
+ * - 요약 없음: ## 트랜스크립트 (타임스탬프 평문)
+ */
+export function buildPlaudBody(
+  detail: PlaudRecordingDetail,
+  region: PlaudRegion,
+  stt?: SttResult
+): string {
+  const vars = buildVars(detail, region);
+  const effectiveTranscript = (stt && !detail.transcript ? stt.text : vars.transcript).trim();
+
+  const body: string[] = [PLAUD_CONTENT_START, ""];
   if (vars.summary.trim()) {
-    // AI 요약(정제된 전체 전사 포함)이 있으면 타임스탬프 트랜스크립트는 생략
     body.push("## AI 요약", "", vars.summary.trim(), "");
+    if (effectiveTranscript) {
+      // 접힌 콜아웃 — 펼치면 [m:ss] 타임스탬프 클릭으로 해당 위치 재생 가능
+      body.push("> [!note]- 타임스탬프 트랜스크립트 (읽기 모드에서 시간 클릭 → 해당 위치 재생)");
+      for (const line of effectiveTranscript.split("\n")) {
+        body.push(`> ${line}`);
+      }
+      body.push("");
+    }
   } else {
     body.push("## 트랜스크립트", "");
-    body.push(vars.transcript.trim() || "전사된 트랜스크립트가 없습니다.");
+    body.push(effectiveTranscript || "전사된 트랜스크립트가 없습니다.");
     body.push("");
   }
-
-  return fm + body.join("\n");
+  body.push(PLAUD_CONTENT_END);
+  return body.join("\n");
 }
 
 async function ensureFolder(app: App, folder: string): Promise<void> {
@@ -245,6 +274,23 @@ export interface ImportOptions {
   runTemplater?: boolean;
   /** 외부 STT 결과 — frontmatter에 출처 메타 기록 */
   stt?: SttResult;
+  /** 임포트 직후 성경 구절 자동 wikilink 변환 */
+  autoBibleWikilink?: boolean;
+}
+
+/** 노트 전체에 성경 구절 wikilink 변환 적용 (frontmatter 보존은 bible.ts가 보장) */
+async function applyBibleWikilinks(app: App, file: TFile): Promise<number> {
+  try {
+    const raw = await app.vault.read(file);
+    const { text, count } = convertBibleRefsInNote(raw);
+    if (count > 0 && text !== raw) {
+      await app.vault.modify(file, text);
+    }
+    return count;
+  } catch (e) {
+    console.error("[A4P Plaud] 성경 wikilink 자동 변환 실패", e);
+    return 0;
+  }
 }
 
 export async function importRecording(
@@ -283,5 +329,49 @@ export async function importRecording(
     await runTemplaterOnDisk(app, file);
   }
 
+  if (options.autoBibleWikilink) {
+    await applyBibleWikilinks(app, file);
+  }
+
   return { file, existed: false };
+}
+
+export interface ResyncResult {
+  /** replaced = 마커 구간 교체, appended = 마커 없어 본문 끝에 추가 */
+  mode: "replaced" | "appended";
+}
+
+/**
+ * 기존 노트의 플러그인 소유 구간(마커 사이)을 서버 최신 요약/전사로 교체한다.
+ * 마커가 없는 노트(구버전 임포트)는 본문 끝에 새 구간을 추가한다.
+ * 사용자가 노트에 직접 쓴 내용은 건드리지 않는다.
+ */
+export async function resyncRecording(
+  app: App,
+  detail: PlaudRecordingDetail,
+  file: TFile,
+  options: { autoBibleWikilink?: boolean } = {}
+): Promise<ResyncResult> {
+  const raw = await app.vault.read(file);
+  const newBody = buildPlaudBody(detail, "");
+  const startIdx = raw.indexOf(PLAUD_CONTENT_START);
+  const endIdx = raw.indexOf(PLAUD_CONTENT_END);
+
+  let next: string;
+  let mode: ResyncResult["mode"];
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    next = raw.slice(0, startIdx) + newBody + raw.slice(endIdx + PLAUD_CONTENT_END.length);
+    mode = "replaced";
+  } else {
+    next = `${raw.trimEnd()}\n\n${newBody}\n`;
+    mode = "appended";
+  }
+
+  if (next !== raw) {
+    await app.vault.modify(file, next);
+  }
+  if (options.autoBibleWikilink) {
+    await applyBibleWikilinks(app, file);
+  }
+  return { mode };
 }

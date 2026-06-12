@@ -47,9 +47,21 @@ export interface PlaudRecording {
   serial_number?: string;
 }
 
+/** 전사 세그먼트 (서버 실측 구조) */
+export interface PlaudTranscriptSegment {
+  content: string;
+  /** ms */
+  start_time: number;
+  /** ms */
+  end_time: number;
+  speaker?: string;
+}
+
 export interface PlaudRecordingDetail extends PlaudRecording {
   transcript: string;
   summary?: string;
+  /** 타임스탬프 점프용 원본 세그먼트 (없으면 평문 전사만) */
+  segments?: PlaudTranscriptSegment[];
 }
 
 export type SttProvider = "groq" | "openai";
@@ -72,6 +84,8 @@ export interface PlaudSettings {
   sttLanguage: string;
   /** 디폴트 공급자 실패 시 자동으로 다른 공급자 시도 */
   sttAutoFallback: boolean;
+  /** 임포트 시 성경 구절 자동 wikilink 변환 */
+  autoBibleWikilink: boolean;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
@@ -85,6 +99,7 @@ export const DEFAULT_SETTINGS: PlaudSettings = {
   sttOpenaiModel: "whisper-1",
   sttLanguage: "ko",
   sttAutoFallback: false,
+  autoBibleWikilink: true,
 };
 
 /** 공급자별 최대 파일 크기 (바이트) */

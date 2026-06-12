@@ -201,3 +201,14 @@
   20% { opacity: 1; transform: scale(1.2); }
   100% { opacity: 0.85; transform: scale(1); }
 }
+
+/* 타임스탬프 클릭 → 재생 점프 링크 */
+.a4p-plaud-ts-link {
+  color: var(--text-accent);
+  cursor: pointer;
+  font-family: var(--font-monospace);
+  font-size: 0.88em;
+}
+.a4p-plaud-ts-link:hover {
+  text-decoration: underline;
+}
