@@ -4,15 +4,24 @@
  */
 export type PlaudRegion = string;
 
-/** 공식 MCP 서버 (OAuth + JSON-RPC) */
-export const PLAUD_MCP_BASE = "https://mcp.plaud.ai";
-export const PLAUD_MCP_ENDPOINT = `${PLAUD_MCP_BASE}/mcp`;
-/** OAuth redirect — Obsidian 커스텀 프로토콜 핸들러 */
-export const PLAUD_OAUTH_PROTOCOL = "a4p-plaud-oauth";
-export const PLAUD_OAUTH_REDIRECT = `obsidian://${PLAUD_OAUTH_PROTOCOL}`;
+/**
+ * Plaud 공식 개발자 API (Dev API). 공식 MCP/CLI(@plaud-ai/mcp, @plaud-ai/cli)가
+ * 사용하는 것과 동일한 OAuth + REST 표면이다.
+ * mcp.plaud.ai JSON-RPC 경유(v0.4~0.5)는 refresh token 수명이 짧아 며칠마다
+ * 재로그인이 필요했으므로 v0.6.0에서 이 경로로 전환했다.
+ */
+export const PLAUD_DEV_API_BASE = "https://platform.plaud.ai/developer/api";
+export const PLAUD_AUTHORIZE_URL = "https://web.plaud.ai/platform/oauth";
+export const PLAUD_TOKEN_URL = `${PLAUD_DEV_API_BASE}/oauth/third-party/access-token`;
+export const PLAUD_REFRESH_URL = `${PLAUD_TOKEN_URL}/refresh`;
+/** 공식 배포 패키지에 내장된 public client (secret 없음) */
+export const PLAUD_CLIENT_ID = "client_9c501dad-8a0d-40b2-a7b0-d1cb8787f674";
+/** 공식 client에 등록된 유일한 redirect — loopback 콜백 서버 포트 고정 */
+export const PLAUD_CALLBACK_PORT = 8199;
+export const PLAUD_REDIRECT_URI = `http://localhost:${PLAUD_CALLBACK_PORT}/auth/callback`;
 
 /**
- * OAuth 2.1 토큰 번들. mcp.plaud.ai/token 응답 + 동적 등록 client_id.
+ * OAuth 토큰 번들. Dev API access-token 응답 기반.
  * 만료 시 refreshToken으로 자동 재발급한다.
  */
 export interface PlaudTokenData {

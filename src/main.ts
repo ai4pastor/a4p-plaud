@@ -1,7 +1,7 @@
-import { Notice, ObsidianProtocolData, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { PlaudAuthError, isTokenExpired, isTokenNearExpiry } from "./auth";
-import { getRecordingDetail, getUserInfo } from "./api";
+import { getRecordingDetail, getUserInfo, PlaudApiError, setReauthHandler } from "./api";
 import { resyncRecording } from "./import";
 import {
   buildAuthorizeUrl,
@@ -9,9 +9,8 @@ import {
   createState,
   exchangeCode,
   refreshAccessToken,
-  registerClient,
 } from "./oauth";
-import { mcpListTools, resetMcpSession, setReauthHandler } from "./mcp";
+import { closeCallbackServer, waitForOAuthCode } from "./callback";
 import { PLAUD_VIEW_TYPE, PlaudListView } from "./view";
 import { convertBibleRefsInNote } from "./bible";
 import { decryptFromBase64, encryptToBase64, isEncryptionAvailable } from "./storage";
@@ -20,19 +19,11 @@ import {
   PlaudSettings,
   PlaudTokenData,
   PlaudUserInfo,
-  PLAUD_OAUTH_PROTOCOL,
-  PLAUD_OAUTH_REDIRECT,
 } from "./types";
 
 interface LoginStatus {
   loggedIn: boolean;
   user?: PlaudUserInfo;
-}
-
-interface PendingAuth {
-  clientId: string;
-  verifier: string;
-  state: string;
 }
 
 export default class A4PPlaudPlugin extends Plugin {
@@ -43,16 +34,13 @@ export default class A4PPlaudPlugin extends Plugin {
   private settingTab: PlaudSettingTab | null = null;
   /** 동시 401에도 토큰 갱신은 1회만 — single-flight 가드 */
   private reloginPromise: Promise<PlaudTokenData | null> | null = null;
-  /** OAuth 진행 중 임시 상태 (브라우저 콜백까지) */
-  private pendingAuth: PendingAuth | null = null;
+  /** 로그인 진행 중 중복 시작 방지 */
+  private loginInProgress = false;
 
   async onload(): Promise<void> {
     console.log("A4P Plaud loaded");
     await this.loadSettings();
     setReauthHandler(() => this.reLogin());
-    this.registerObsidianProtocolHandler(PLAUD_OAUTH_PROTOCOL, (params) => {
-      void this.handleOAuthCallback(params);
-    });
     await this.restoreSession();
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.style.display = "none";
@@ -87,12 +75,6 @@ export default class A4PPlaudPlugin extends Plugin {
       id: "plaud-resync-note",
       name: "현재 노트를 Plaud 최신 요약/전사로 갱신",
       callback: () => void this.resyncActiveNote(),
-    });
-
-    this.addCommand({
-      id: "plaud-mcp-list-tools",
-      name: "Plaud MCP 도구 목록 콘솔 출력 (디버그)",
-      callback: () => void this.debugListTools(),
     });
 
     // 읽기 모드에서 plaud 노트의 [m:ss] 타임스탬프를 클릭 가능하게 — 클릭 시 그 위치 재생
@@ -185,19 +167,6 @@ export default class A4PPlaudPlugin extends Plugin {
     }
   }
 
-  private async debugListTools(): Promise<void> {
-    if (!this.token) {
-      new Notice("먼저 로그인해 주세요.");
-      return;
-    }
-    try {
-      await mcpListTools(this.token);
-      new Notice("MCP 도구 목록을 콘솔(개발자 도구)에 출력했습니다.");
-    } catch (e) {
-      new Notice(`도구 목록 조회 실패: ${(e as Error).message ?? "unknown"}`);
-    }
-  }
-
   private async convertActiveBibleRefs(): Promise<void> {
     const file = this.app.workspace.getActiveFile();
     if (!file || !(file instanceof TFile)) {
@@ -229,7 +198,7 @@ export default class A4PPlaudPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     setReauthHandler(null);
-    resetMcpSession();
+    closeCallbackServer();
     console.log("A4P Plaud unloaded");
   }
 
@@ -273,54 +242,28 @@ export default class A4PPlaudPlugin extends Plugin {
     window.open(url, "_blank");
   }
 
-  /** 설정에서 "Plaud 로그인" 버튼 → 브라우저 OAuth 시작 */
+  /** 설정에서 "Plaud 로그인" 버튼 → 브라우저 OAuth 시작 (loopback 콜백) */
   async startLogin(): Promise<void> {
     if (!isEncryptionAvailable()) {
       new Notice("이 시스템에서는 토큰을 안전하게 저장할 수 없어 로그인할 수 없습니다.");
       return;
     }
+    if (this.loginInProgress) {
+      new Notice("이미 로그인이 진행 중입니다. 브라우저에서 로그인을 완료해 주세요.");
+      return;
+    }
+    this.loginInProgress = true;
     try {
-      const redirectUri = PLAUD_OAUTH_REDIRECT;
-      const clientId = await registerClient(redirectUri);
       const { verifier, challenge } = createPkce();
       const state = createState();
-      this.pendingAuth = { clientId, verifier, state };
-      const url = buildAuthorizeUrl({ clientId, redirectUri, challenge, state });
+      // 콜백 서버를 먼저 열어 대기시킨 뒤 브라우저를 연다
+      const codePromise = waitForOAuthCode(state);
+      const url = buildAuthorizeUrl({ challenge, state });
       this.openExternal(url);
       new Notice("브라우저에서 Plaud 로그인(구글 로그인 그대로)을 완료해 주세요.");
-    } catch (e) {
-      new Notice(this.authErr(e));
-    }
-  }
 
-  private async handleOAuthCallback(params: ObsidianProtocolData): Promise<void> {
-    const pending = this.pendingAuth;
-    if (!pending) {
-      new Notice("진행 중인 로그인 세션이 없습니다. 설정에서 다시 시도해 주세요.");
-      return;
-    }
-    if (params.error) {
-      this.pendingAuth = null;
-      new Notice(`Plaud 로그인 거부: ${params.error_description ?? params.error}`);
-      return;
-    }
-    if (!params.code) {
-      new Notice("인증 코드를 받지 못했습니다. 다시 시도해 주세요.");
-      return;
-    }
-    if (params.state !== pending.state) {
-      this.pendingAuth = null;
-      new Notice("로그인 상태 검증에 실패했습니다(보안). 다시 시도해 주세요.");
-      return;
-    }
-    try {
-      const token = await exchangeCode({
-        code: params.code,
-        verifier: pending.verifier,
-        clientId: pending.clientId,
-        redirectUri: PLAUD_OAUTH_REDIRECT,
-      });
-      resetMcpSession();
+      const code = await codePromise;
+      const token = await exchangeCode({ code, verifier, state });
       await this.persistToken(token);
       this.token = token;
       try {
@@ -336,7 +279,7 @@ export default class A4PPlaudPlugin extends Plugin {
     } catch (e) {
       new Notice(this.authErr(e));
     } finally {
-      this.pendingAuth = null;
+      this.loginInProgress = false;
     }
   }
 
@@ -350,11 +293,7 @@ export default class A4PPlaudPlugin extends Plugin {
       const cur = this.token;
       if (!cur || !cur.refreshToken) return null;
       try {
-        const token = await refreshAccessToken({
-          refreshToken: cur.refreshToken,
-          clientId: cur.clientId,
-        });
-        resetMcpSession();
+        const token = await refreshAccessToken({ refreshToken: cur.refreshToken });
         await this.persistToken(token);
         this.token = token;
         return token;
@@ -389,6 +328,14 @@ export default class A4PPlaudPlugin extends Plugin {
           const { user } = await getUserInfo(this.token);
           this.user = user;
         } catch (e) {
+          // 구버전(mcp.plaud.ai) 토큰은 새 API에서 무효 — 세션을 정리하고 재로그인 안내
+          if (e instanceof PlaudApiError && e.code === "UNAUTHORIZED") {
+            this.token = null;
+            this.settings.encryptedToken = null;
+            await this.saveSettings();
+            new Notice("플러그인 업데이트로 로그인 방식이 개선되었습니다. 설정에서 한 번만 다시 로그인해 주세요.");
+            return;
+          }
           console.warn("[A4P Plaud] 세션 복원 중 사용자 정보 조회 실패", e);
         }
       }
@@ -409,10 +356,11 @@ export default class A4PPlaudPlugin extends Plugin {
   }
 
   async logout(): Promise<void> {
+    // 서버측 revoke는 하지 않는다 — 공식 CLI/MCP와 client_id를 공유하므로
+    // revoke 시 그쪽 세션까지 무효화될 수 있다. 로컬 토큰만 폐기.
     this.token = null;
     this.user = null;
     this.settings.encryptedToken = null;
-    resetMcpSession();
     await this.saveSettings();
     this.reloadViews();
   }
