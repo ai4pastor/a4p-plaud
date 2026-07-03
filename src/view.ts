@@ -15,6 +15,7 @@ import { PlaudAuthError } from "./auth";
 import { formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
 import {
+  DateRangeFilter,
   PlaudRecording,
   PlaudRecordingDetail,
   STT_COST_PER_HOUR,
@@ -22,6 +23,7 @@ import {
   SttResult,
 } from "./types";
 import { downloadMp3, SttError, transcribeAudio } from "./stt";
+import { saveAudioToVault } from "./import";
 
 /** 세션 동안 plaud_id → STT 결과 캐시 (모달 닫혀도 유지) */
 const sttCache: Map<string, SttResult> = new Map();
@@ -30,11 +32,64 @@ const sttInProgress: Map<string, string> = new Map();
 
 export const PLAUD_VIEW_TYPE = "a4p-plaud-list-view";
 
+/**
+ * 자동 STT: 설정이 켜져 있고 전사가 없으면 외부 STT를 실행해 결과를 반환한다.
+ * 실패해도 throw하지 않고 undefined — 임포트는 전사 없이 계속 진행된다.
+ */
+async function autoSttIfNeeded(
+  plugin: A4PPlaudPlugin,
+  detail: PlaudRecordingDetail,
+  statusPrefix: string
+): Promise<SttResult | undefined> {
+  if (!plugin.settings.autoSttOnImport) return undefined;
+  if (detail.transcript) return undefined;
+  const cached = sttCache.get(detail.id);
+  if (cached) return cached;
+
+  const provider = plugin.settings.sttProvider;
+  const key = provider === "groq" ? plugin.getGroqKey() : plugin.getOpenaiKey();
+  if (!key) {
+    console.warn(`[A4P Plaud] 자동 STT 건너뜀 — ${provider} API 키 없음`);
+    return undefined;
+  }
+  const token = plugin.getToken();
+  if (!token) return undefined;
+
+  try {
+    plugin.setStatusBar(`${statusPrefix} 🎤 오디오 다운로드 중...`);
+    const url = await getMp3Url(token, detail.id);
+    if (!url) return undefined;
+    const audio = await downloadMp3(url);
+    if (audio.byteLength > STT_MAX_FILE_SIZE[provider] && !plugin.settings.sttAutoFallback) {
+      console.warn("[A4P Plaud] 자동 STT 건너뜀 — 파일 크기 초과");
+      return undefined;
+    }
+    plugin.setStatusBar(`${statusPrefix} 🎤 STT 전사 중...`);
+    const result = await transcribeAudio({
+      provider,
+      groqKey: plugin.getGroqKey(),
+      openaiKey: plugin.getOpenaiKey(),
+      groqModel: plugin.settings.sttGroqModel,
+      openaiModel: plugin.settings.sttOpenaiModel,
+      language: plugin.settings.sttLanguage,
+      audio,
+      filename: `${detail.id}.mp3`,
+      autoFallback: plugin.settings.sttAutoFallback,
+    });
+    sttCache.set(detail.id, result);
+    return result;
+  } catch (e) {
+    console.warn("[A4P Plaud] 자동 STT 실패 (임포트는 계속)", e);
+    return undefined;
+  }
+}
+
 export class PlaudListView extends ItemView {
   plugin: A4PPlaudPlugin;
   private recordings: PlaudRecording[] = [];
   private filtered: PlaudRecording[] = [];
   private query = "";
+  private dateRange: DateRangeFilter = "all";
   private loading = false;
   private listContainer: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
@@ -86,6 +141,22 @@ export class PlaudListView extends ItemView {
     search.style.flex = "1";
     search.addEventListener("input", () => {
       this.query = search.value.trim().toLowerCase();
+      this.applyFilter();
+    });
+
+    const rangeSel = toolbar.createEl("select", { cls: "dropdown" });
+    rangeSel.title = "기간 필터";
+    for (const [value, label] of [
+      ["all", "전체"],
+      ["today", "오늘"],
+      ["7d", "7일"],
+      ["30d", "30일"],
+    ] as const) {
+      rangeSel.createEl("option", { value, text: label });
+    }
+    rangeSel.value = this.dateRange;
+    rangeSel.addEventListener("change", () => {
+      this.dateRange = rangeSel.value as DateRangeFilter;
       this.applyFilter();
     });
 
@@ -444,8 +515,10 @@ export class PlaudListView extends ItemView {
           const tok = this.plugin.getToken();
           if (!tok) throw new Error("로그인 세션이 끊어졌습니다.");
           const detail = await getRecordingDetail(tok, rec.id);
+          const stt = await autoSttIfNeeded(this.plugin, detail, progress);
           const { file } = await importRecording(this.app, detail, "", this.plugin.settings.importFolder, {
             templatePath: this.plugin.settings.templatePath || undefined,
+            stt,
             autoBibleWikilink: this.plugin.settings.autoBibleWikilink,
           });
           this.plaudIdIndex.set(rec.id, file);
@@ -522,17 +595,31 @@ export class PlaudListView extends ItemView {
     this.updateBatchBadge();
   }
 
+  /** 기간 필터 시작 시각 (epoch ms). "all"이면 0. */
+  private dateCutoff(): number {
+    const now = new Date();
+    switch (this.dateRange) {
+      case "today":
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      case "7d":
+        return Date.now() - 7 * 86400000;
+      case "30d":
+        return Date.now() - 30 * 86400000;
+      default:
+        return 0;
+    }
+  }
+
   private applyFilter(): void {
     const q = this.query;
-    if (!q) {
-      this.filtered = this.recordings;
-    } else {
-      this.filtered = this.recordings.filter((r) => {
-        if (r.filename.toLowerCase().includes(q)) return true;
-        if (r.keywords?.some((k) => k.toLowerCase().includes(q))) return true;
-        return false;
-      });
-    }
+    const cutoff = this.dateCutoff();
+    this.filtered = this.recordings.filter((r) => {
+      if (cutoff > 0 && r.start_time < cutoff) return false;
+      if (!q) return true;
+      if (r.filename.toLowerCase().includes(q)) return true;
+      if (r.keywords?.some((k) => k.toLowerCase().includes(q))) return true;
+      return false;
+    });
     this.refreshStatus();
     this.renderList();
     this.updateBatchBadge();
@@ -540,7 +627,7 @@ export class PlaudListView extends ItemView {
 
   private refreshStatus(): void {
     const total = this.recordings.length;
-    if (this.query) {
+    if (this.query || this.dateRange !== "all") {
       this.setStatus(`필터: ${this.filtered.length} / ${total}개`);
     } else {
       this.setStatus(`총 ${total}개`);
@@ -556,7 +643,7 @@ export class PlaudListView extends ItemView {
       const empty = c.createDiv();
       empty.style.padding = "1em";
       empty.style.color = "var(--text-muted)";
-      empty.setText(this.query ? "검색 결과가 없습니다." : "녹음이 없습니다.");
+      empty.setText(this.query || this.dateRange !== "all" ? "조건에 맞는 녹음이 없습니다." : "녹음이 없습니다.");
       return;
     }
 
@@ -591,9 +678,9 @@ export class PlaudListView extends ItemView {
           ev.stopPropagation();
           this.app.workspace.getLeaf(false).openFile(existingFile);
         });
-        // 보조 ⓘ — 상세 모달 (이름 변경·트랜스크립트 보기 진입점)
+        // 보조 ⓘ — 상세 모달 (트랜스크립트·오디오 저장 진입점)
         const detailBtn = meta.createEl("button", { text: "ⓘ" });
-        detailBtn.title = "상세 / 이름 변경";
+        detailBtn.title = "상세 보기";
         detailBtn.style.marginLeft = "4px";
         detailBtn.style.padding = "4px 9px";
         detailBtn.style.fontSize = "0.85em";
@@ -716,6 +803,16 @@ class PlaudDetailModal extends Modal {
         `${formatStartTime(detail.start_time)} · ${formatDuration(detail.duration)} · id: ${detail.id}`
       );
 
+      // 가용성 한 줄 (공식 CLI의 file 명령과 동일 정보)
+      const avail = contentEl.createDiv();
+      avail.style.fontSize = "0.82em";
+      avail.style.color = "var(--text-muted)";
+      avail.style.marginBottom = "0.8em";
+      const mark = (ok: boolean | undefined) => (ok ? "✓" : "—");
+      avail.setText(
+        `오디오 ${mark(detail.has_audio)} · 전사 ${mark(!!detail.transcript)} · AI 요약 ${mark(!!detail.summary)}`
+      );
+
       this.renderActions(contentEl, detail);
 
       if (detail.summary) {
@@ -808,11 +905,41 @@ class PlaudDetailModal extends Modal {
     }
   }
 
+  /** 🔊 오디오 볼트 저장 버튼 — 저장 후 임포트 노트가 있으면 임베드까지 */
+  private addAudioSaveButton(bar: HTMLElement, detail: PlaudRecordingDetail): void {
+    if (detail.has_audio === false) return;
+    const btn = bar.createEl("button", { text: "🔊 오디오 저장" });
+    btn.title = "mp3를 볼트에 다운로드 (노트가 있으면 끝에 임베드 추가)";
+    btn.addEventListener("click", async () => {
+      const token = this.plugin.getToken();
+      if (!token) {
+        new Notice("로그인되지 않았습니다.");
+        return;
+      }
+      btn.setAttr("disabled", "true");
+      btn.setText("다운로드 중...");
+      try {
+        const res = await saveAudioToVault(this.app, this.plugin.settings, token, detail);
+        new Notice(
+          res.existed
+            ? `이미 저장됨: ${res.path}`
+            : `🔊 오디오 저장 완료: ${res.path}${res.embedded ? "\n(노트에 임베드 추가)" : ""}`
+        );
+        btn.setText("🔊 저장됨");
+      } catch (e) {
+        new Notice(`오디오 저장 실패: ${(e as Error).message ?? "unknown"}`);
+        btn.removeAttribute("disabled");
+        btn.setText("🔊 오디오 저장");
+      }
+    });
+  }
+
   private renderActions(parent: HTMLElement, detail: PlaudRecordingDetail): void {
     const bar = parent.createDiv();
     bar.style.display = "flex";
     bar.style.gap = "8px";
     bar.style.marginBottom = "0.5em";
+    bar.style.flexWrap = "wrap";
 
     const existing = findNoteByPlaudId(this.app, detail.id);
     if (existing) {
@@ -823,6 +950,8 @@ class PlaudDetailModal extends Modal {
         this.close();
       });
 
+      this.addAudioSaveButton(bar, detail);
+
       const info = bar.createSpan({ text: `이미 임포트됨: ${existing.path}` });
       info.style.fontSize = "0.85em";
       info.style.color = "var(--text-muted)";
@@ -832,6 +961,7 @@ class PlaudDetailModal extends Modal {
 
     const importBtn = bar.createEl("button", { text: "노트로 가져오기" });
     importBtn.addClass("mod-cta");
+    this.addAudioSaveButton(bar, detail);
 
     const tplRow = parent.createDiv();
     tplRow.style.display = "flex";
@@ -868,8 +998,12 @@ class PlaudDetailModal extends Modal {
       try {
         const region = "";
         const tplPath = tplInput.value.trim();
-        // STT 결과가 캐시에 있으면 transcript 자리에 사용
-        const stt = sttCache.get(detail.id);
+        // STT 결과가 캐시에 있으면 사용, 없고 자동 STT가 켜져 있으면 지금 실행
+        const stt =
+          sttCache.get(detail.id) ??
+          (await autoSttIfNeeded(this.plugin, detail, "Plaud 임포트:").finally(() =>
+            this.plugin.setStatusBar("")
+          ));
         const effective: PlaudRecordingDetail =
           stt && !detail.transcript ? { ...detail, transcript: stt.text } : detail;
         const { file, existed } = await importRecording(

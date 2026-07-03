@@ -71,7 +71,12 @@ export interface PlaudRecordingDetail extends PlaudRecording {
   summary?: string;
   /** 타임스탬프 점프용 원본 세그먼트 (없으면 평문 전사만) */
   segments?: PlaudTranscriptSegment[];
+  /** 오디오(presigned URL) 존재 여부 — 상세 응답 실측 */
+  has_audio?: boolean;
 }
+
+/** 사이드패널 기간 필터 */
+export type DateRangeFilter = "all" | "today" | "7d" | "30d";
 
 export type SttProvider = "groq" | "openai";
 
@@ -95,6 +100,12 @@ export interface PlaudSettings {
   sttAutoFallback: boolean;
   /** 임포트 시 성경 구절 자동 wikilink 변환 */
   autoBibleWikilink: boolean;
+  /** 전사 없는 녹음 임포트 시 외부 STT 자동 실행 */
+  autoSttOnImport: boolean;
+  /** 오디오 저장 폴더 (빈 문자열이면 "{importFolder}/audio") */
+  audioFolder: string;
+  /** 새 녹음 자동 감지 주기(분). 0 = 끔 */
+  autoCheckMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
@@ -109,6 +120,9 @@ export const DEFAULT_SETTINGS: PlaudSettings = {
   sttLanguage: "ko",
   sttAutoFallback: false,
   autoBibleWikilink: true,
+  autoSttOnImport: false,
+  audioFolder: "",
+  autoCheckMinutes: 0,
 };
 
 /** 공급자별 최대 파일 크기 (바이트) */

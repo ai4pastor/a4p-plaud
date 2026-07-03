@@ -429,6 +429,17 @@ export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecord
   return recordings;
 }
 
+/** 첫 페이지(최신 100개)만 — 새 녹음 감지 폴링용 경량 조회 */
+export async function listRecentRecordings(token: PlaudTokenData): Promise<PlaudRecording[]> {
+  const { json } = await apiGet(token, "/open/third-party/files/?page=1&page_size=100");
+  const out: PlaudRecording[] = [];
+  for (const raw of asArray(json)) {
+    const rec = normalizeRecording(raw);
+    if (rec && !rec.is_trash) out.push(rec);
+  }
+  return out;
+}
+
 let loggedDetailSample = false;
 let notifiedTranscriptError = false;
 
@@ -491,6 +502,8 @@ export async function getRecordingDetail(
     summary,
     segments: segments ?? undefined,
     is_trans: base.is_trans || !!transcript,
+    is_summary: base.is_summary || !!summary,
+    has_audio: !!firstString(fileObj, ["presigned_url", "download_url", "temp_url", "audio_url"]),
   };
 }
 

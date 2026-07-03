@@ -1,7 +1,9 @@
 import { App, TFile, normalizePath } from "obsidian";
-import { PlaudRecordingDetail, PlaudRegion, SttResult } from "./types";
+import { PlaudRecordingDetail, PlaudRegion, PlaudSettings, PlaudTokenData, SttResult } from "./types";
 import { formatDuration, formatStartTime } from "./format";
 import { convertBibleRefsInNote } from "./bible";
+import { getMp3Url } from "./api";
+import { downloadMp3 } from "./stt";
 
 /** 플러그인 소유 본문 구간 마커 — 재동기화 시 이 사이만 교체한다 */
 export const PLAUD_CONTENT_START = "<!-- plaud:content:start -->";
@@ -44,6 +46,8 @@ interface TemplateVars {
   duration_seconds: string;
   region: string;
   imported_at: string;
+  serial_number: string;
+  keywords: string;
 }
 
 function buildVars(detail: PlaudRecordingDetail, region: PlaudRegion): TemplateVars {
@@ -58,6 +62,8 @@ function buildVars(detail: PlaudRecordingDetail, region: PlaudRegion): TemplateV
     duration_seconds: String(durationSec),
     region,
     imported_at: formatStartTime(Date.now()),
+    serial_number: detail.serial_number ?? "",
+    keywords: (detail.keywords ?? []).join(", "),
   };
 }
 
@@ -334,6 +340,57 @@ export async function importRecording(
   }
 
   return { file, existed: false };
+}
+
+export interface SaveAudioResult {
+  /** 볼트 내 저장 경로 */
+  path: string;
+  /** 이미 저장돼 있어 재다운로드하지 않음 */
+  existed: boolean;
+  /** 임포트 노트에 임베드를 추가했는지 */
+  embedded: boolean;
+}
+
+/**
+ * 녹음 오디오(mp3)를 볼트에 저장한다.
+ * - 저장 폴더: settings.audioFolder (비어 있으면 "{importFolder}/audio")
+ * - 같은 파일이 이미 있으면 재다운로드하지 않는다.
+ * - 임포트된 노트가 있고 아직 임베드가 없으면 본문 끝에 ![[...]] 추가.
+ */
+export async function saveAudioToVault(
+  app: App,
+  settings: Pick<PlaudSettings, "audioFolder" | "importFolder">,
+  token: PlaudTokenData,
+  detail: PlaudRecordingDetail
+): Promise<SaveAudioResult> {
+  const folder = normalizePath(
+    settings.audioFolder.trim() || `${settings.importFolder}/audio`
+  );
+  const base = sanitizeFilename(detail.filename || detail.id) || detail.id;
+  const path = normalizePath(`${folder}/${base}.mp3`);
+
+  let existed = false;
+  if (app.vault.getAbstractFileByPath(path)) {
+    existed = true;
+  } else {
+    const url = await getMp3Url(token, detail.id);
+    if (!url) throw new Error("오디오 URL을 받지 못했습니다. (오디오가 없는 녹음일 수 있습니다)");
+    const audio = await downloadMp3(url);
+    await ensureFolder(app, folder);
+    await app.vault.createBinary(path, audio);
+  }
+
+  // 임포트 노트가 있으면 임베드 추가 (중복 방지)
+  let embedded = false;
+  const note = findNoteByPlaudId(app, detail.id);
+  if (note) {
+    const raw = await app.vault.read(note);
+    if (!raw.includes(`![[${path}]]`) && !raw.includes(`![[${base}.mp3]]`)) {
+      await app.vault.modify(note, `${raw.trimEnd()}\n\n![[${path}]]\n`);
+      embedded = true;
+    }
+  }
+  return { path, existed, embedded };
 }
 
 export interface ResyncResult {

@@ -1,8 +1,15 @@
 import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { PlaudSettingTab } from "./settings";
 import { PlaudAuthError, isTokenExpired, isTokenNearExpiry } from "./auth";
-import { getRecordingDetail, getUserInfo, PlaudApiError, setReauthHandler } from "./api";
+import {
+  getRecordingDetail,
+  getUserInfo,
+  listRecentRecordings,
+  PlaudApiError,
+  setReauthHandler,
+} from "./api";
 import { resyncRecording } from "./import";
+import { createDigestNote } from "./digest";
 import {
   buildAuthorizeUrl,
   createPkce,
@@ -36,6 +43,10 @@ export default class A4PPlaudPlugin extends Plugin {
   private reloginPromise: Promise<PlaudTokenData | null> | null = null;
   /** 로그인 진행 중 중복 시작 방지 */
   private loginInProgress = false;
+  /** 새 녹음 자동 감지 타이머 (설정 변경 시 재설정) */
+  private autoCheckTimer: number | null = null;
+  /** 마지막으로 확인한 최신 녹음 시각 — 첫 폴링에서 기준선만 잡고 알리지 않음 */
+  private lastSeenLatest = 0;
 
   async onload(): Promise<void> {
     console.log("A4P Plaud loaded");
@@ -76,6 +87,26 @@ export default class A4PPlaudPlugin extends Plugin {
       name: "현재 노트를 Plaud 최신 요약/전사로 갱신",
       callback: () => void this.resyncActiveNote(),
     });
+
+    this.addCommand({
+      id: "plaud-resync-all",
+      name: "임포트된 모든 Plaud 노트 재동기화",
+      callback: () => void this.resyncAllNotes(),
+    });
+
+    this.addCommand({
+      id: "plaud-digest-7",
+      name: "Plaud 다이제스트 노트 생성 (최근 7일)",
+      callback: () => void this.createDigest(7),
+    });
+
+    this.addCommand({
+      id: "plaud-digest-30",
+      name: "Plaud 다이제스트 노트 생성 (최근 30일)",
+      callback: () => void this.createDigest(30),
+    });
+
+    this.setupAutoCheck();
 
     // 읽기 모드에서 plaud 노트의 [m:ss] 타임스탬프를 클릭 가능하게 — 클릭 시 그 위치 재생
     this.registerMarkdownPostProcessor((el, ctx) => {
@@ -132,6 +163,69 @@ export default class A4PPlaudPlugin extends Plugin {
     if (v instanceof PlaudListView) {
       await v.playAt(plaudId, seconds);
     }
+  }
+
+  private async createDigest(days: number): Promise<void> {
+    if (!this.token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    new Notice(`최근 ${days}일 다이제스트 생성 중... (녹음 수에 따라 시간이 걸립니다)`);
+    try {
+      const file = await createDigestNote(this.app, this, days);
+      new Notice(`✅ 다이제스트 생성: ${file.path}`);
+      await this.app.workspace.getLeaf(false).openFile(file);
+    } catch (e) {
+      console.error("[A4P Plaud] 다이제스트 실패", e);
+      new Notice(`다이제스트 실패: ${(e as Error).message ?? "unknown"}`);
+    }
+  }
+
+  private async resyncAllNotes(): Promise<void> {
+    if (!this.token) {
+      new Notice("로그인되지 않았습니다.");
+      return;
+    }
+    const targets: { file: TFile; id: string }[] = [];
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const id = this.app.metadataCache.getFileCache(f)?.frontmatter?.plaud_id;
+      if (typeof id === "string" && id) targets.push({ file: f, id });
+    }
+    if (targets.length === 0) {
+      new Notice("plaud_id가 있는 노트가 없습니다.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `임포트된 노트 ${targets.length}개를 서버 최신 요약/전사로 재동기화할까요?\n(직접 쓴 메모는 보존됩니다)`
+      )
+    ) {
+      return;
+    }
+    let ok = 0;
+    let fail = 0;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i];
+        this.setStatusBar(`Plaud 재동기화 ${i + 1}/${targets.length}`);
+        try {
+          if (!this.token) throw new Error("로그인 세션이 끊어졌습니다.");
+          const detail = await getRecordingDetail(this.token, t.id);
+          await resyncRecording(this.app, detail, t.file, {
+            autoBibleWikilink: this.settings.autoBibleWikilink,
+          });
+          ok++;
+        } catch (e) {
+          fail++;
+          console.error("[A4P Plaud] 재동기화 실패", t.file.path, e);
+        }
+        // 서버 부하 완화
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    } finally {
+      this.setStatusBar("");
+    }
+    new Notice(`재동기화 완료: 성공 ${ok}개${fail ? `, 실패 ${fail}개` : ""}`);
   }
 
   private async resyncActiveNote(): Promise<void> {
@@ -199,7 +293,47 @@ export default class A4PPlaudPlugin extends Plugin {
   async onunload(): Promise<void> {
     setReauthHandler(null);
     closeCallbackServer();
+    if (this.autoCheckTimer !== null) window.clearInterval(this.autoCheckTimer);
     console.log("A4P Plaud unloaded");
+  }
+
+  /** 새 녹음 자동 감지 타이머 설정 (설정 변경 시 settings.ts가 재호출) */
+  setupAutoCheck(): void {
+    if (this.autoCheckTimer !== null) {
+      window.clearInterval(this.autoCheckTimer);
+      this.autoCheckTimer = null;
+    }
+    const min = this.settings.autoCheckMinutes;
+    if (!min || min <= 0) return;
+    this.autoCheckTimer = window.setInterval(
+      () => void this.checkNewRecordings(),
+      Math.max(5, min) * 60 * 1000
+    );
+    this.registerInterval(this.autoCheckTimer);
+  }
+
+  private async checkNewRecordings(): Promise<void> {
+    if (!this.token) return;
+    try {
+      const list = await listRecentRecordings(this.token);
+      const latest = list.reduce((m, r) => Math.max(m, r.start_time), 0);
+      if (latest === 0) return;
+      if (this.lastSeenLatest === 0) {
+        // 첫 폴링 — 기준선만 설정
+        this.lastSeenLatest = latest;
+        return;
+      }
+      const fresh = list.filter((r) => r.start_time > this.lastSeenLatest);
+      if (fresh.length === 0) return;
+      this.lastSeenLatest = latest;
+      const first = fresh[0].filename;
+      new Notice(
+        `🎙 새 Plaud 녹음 ${fresh.length}개 도착${first ? `: ${first}${fresh.length > 1 ? " 외" : ""}` : ""}`
+      );
+      this.reloadViews();
+    } catch (e) {
+      console.warn("[A4P Plaud] 새 녹음 확인 실패(다음 주기에 재시도)", e);
+    }
   }
 
   private async activateView(): Promise<void> {

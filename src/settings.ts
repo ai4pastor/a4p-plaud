@@ -84,7 +84,7 @@ export class PlaudSettingTab extends PluginSettingTab {
       .setName("기본 임포트 템플릿")
       .setDesc(
         "vault 내 .md 파일 경로. 비워두면 내장 형식을 사용합니다. " +
-          "지원 변수: {{plaud_id}} {{transcript}} {{summary}} {{filename}} {{date}} {{duration}} {{duration_seconds}} {{region}} {{imported_at}}. " +
+          "지원 변수: {{plaud_id}} {{transcript}} {{summary}} {{filename}} {{date}} {{duration}} {{duration_seconds}} {{serial_number}} {{keywords}} {{region}} {{imported_at}}. " +
           "Templater가 설치돼 있으면 <% ... %> 문법도 노트 생성 직후 자동 처리됩니다."
       );
     let tplTextRef: { setValue: (v: string) => void } | null = null;
@@ -117,6 +117,38 @@ export class PlaudSettingTab extends PluginSettingTab {
           tplTextRef?.setValue("");
         })
     );
+
+    new Setting(containerEl)
+      .setName("오디오 저장 폴더")
+      .setDesc(
+        "상세 모달의 '🔊 오디오 저장'이 mp3를 내려받을 vault 폴더. 비워두면 \"{저장 폴더}/audio\"를 사용합니다."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(`${this.plugin.settings.importFolder}/audio`)
+          .setValue(this.plugin.settings.audioFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.audioFolder = v.trim();
+            await this.plugin.persistSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("새 녹음 자동 감지")
+      .setDesc("주기적으로 Plaud 서버를 확인해 새 녹음이 오면 알림을 띄웁니다.")
+      .addDropdown((d) =>
+        d
+          .addOption("0", "끔")
+          .addOption("10", "10분마다")
+          .addOption("30", "30분마다")
+          .addOption("60", "1시간마다")
+          .setValue(String(this.plugin.settings.autoCheckMinutes))
+          .onChange(async (v) => {
+            this.plugin.settings.autoCheckMinutes = Number(v) || 0;
+            await this.plugin.persistSettings();
+            this.plugin.setupAutoCheck();
+          })
+      );
 
     this.renderSttSection(containerEl);
   }
@@ -369,6 +401,19 @@ export class PlaudSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.sttAutoFallback).onChange(async (v) => {
           this.plugin.settings.sttAutoFallback = v;
+          await this.plugin.persistSettings();
+        })
+      );
+
+    new Setting(el)
+      .setName("임포트 시 자동 STT")
+      .setDesc(
+        "Plaud 전사가 없는 녹음을 노트로 가져올 때 외부 STT를 자동 실행합니다. " +
+          "(일괄 임포트에도 적용 — 녹음이 많으면 시간·비용이 늘어납니다)"
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoSttOnImport).onChange(async (v) => {
+          this.plugin.settings.autoSttOnImport = v;
           await this.plugin.persistSettings();
         })
       );
