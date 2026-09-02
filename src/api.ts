@@ -160,7 +160,7 @@ function asArray(json: unknown): Record<string, unknown>[] {
   return [];
 }
 
-function normalizeRecording(raw: Record<string, unknown>): PlaudRecording | null {
+export function normalizeRecording(raw: Record<string, unknown>): PlaudRecording | null {
   const id = firstString(raw, ["file_id", "id", "fileId", "_id", "uuid"]);
   if (!id) return null;
   const startRaw =
@@ -276,7 +276,7 @@ function normalizeSegments(raw: Record<string, unknown>[]): PlaudTranscriptSegme
   return out;
 }
 
-interface TranscriptData {
+export interface TranscriptData {
   text: string;
   segments: PlaudTranscriptSegment[] | null;
 }
@@ -286,7 +286,7 @@ interface TranscriptData {
  * [{ data_id, data_type, data_content: "<세그먼트 JSON 문자열>" }, ...] 또는 세그먼트 배열 직접.
  * 세그먼트: { content, start_time(ms), end_time(ms), speaker }
  */
-function extractTranscriptData(input: unknown): TranscriptData {
+export function extractTranscriptData(input: unknown): TranscriptData {
   const parsed = deepParse(input);
   if (typeof parsed === "string") {
     return { text: neutralizeHr(parsed.trim()), segments: null };
@@ -337,7 +337,7 @@ function extractTranscriptData(input: unknown): TranscriptData {
  * 요약 추출 (note_list).
  * [{ data_type: "auto_sum_note", data_title: "Summary", data_content: "### 마크다운...", ... }] 계열.
  */
-function extractSummary(input: unknown): string | undefined {
+export function extractSummary(input: unknown): string | undefined {
   const parsed = deepParse(input);
   if (typeof parsed === "string") return stripTimestamps(neutralizeHr(parsed.trim())) || undefined;
 

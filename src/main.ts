@@ -21,12 +21,26 @@ import { closeCallbackServer, waitForOAuthCode } from "./callback";
 import { PLAUD_VIEW_TYPE, PlaudListView } from "./view";
 import { convertBibleRefsInNote } from "./bible";
 import { decryptFromBase64, encryptToBase64, isEncryptionAvailable } from "./storage";
+import { FolderWatcher } from "./watcher";
+import {
+  PLAUD_WEB_API_DEFAULT_BASE,
+  PlaudWebApiError,
+  WebSession,
+  tokenDataFromJwt,
+  webLogin,
+} from "./webapi";
 import {
   DEFAULT_SETTINGS,
   PlaudSettings,
   PlaudTokenData,
   PlaudUserInfo,
+  WebTokenData,
 } from "./types";
+
+interface WebCreds {
+  email: string;
+  password: string;
+}
 
 interface LoginStatus {
   loggedIn: boolean;
@@ -47,6 +61,12 @@ export default class A4PPlaudPlugin extends Plugin {
   private autoCheckTimer: number | null = null;
   /** 마지막으로 확인한 최신 녹음 시각 — 첫 폴링에서 기준선만 잡고 알리지 않음 */
   private lastSeenLatest = 0;
+  /** 감시 폴더 자동 업로드 (비공식 웹 API) */
+  watcher: FolderWatcher | null = null;
+  /** 웹 토큰 메모리 캐시 — 요청마다 키체인 복호화 방지 */
+  private webTokenCache: WebTokenData | null = null;
+  /** 웹 재로그인 single-flight (세션 축출 최소화) */
+  private webReloginPromise: Promise<WebTokenData | null> | null = null;
 
   async onload(): Promise<void> {
     console.log("A4P Plaud loaded");
@@ -106,7 +126,30 @@ export default class A4PPlaudPlugin extends Plugin {
       callback: () => void this.createDigest(30),
     });
 
+    this.addCommand({
+      id: "plaud-watch-scan-now",
+      name: "감시 폴더 지금 스캔",
+      callback: () => {
+        if (!this.settings.watchEnabled) {
+          new Notice("감시 폴더 기능이 꺼져 있습니다. 설정에서 켜 주세요.");
+          return;
+        }
+        new Notice("감시 폴더 스캔 중...");
+        void this.watcher?.scanNow("manual");
+      },
+    });
+
+    this.addCommand({
+      id: "plaud-watch-retry",
+      name: "감시 폴더: 실패한 업로드 재시도",
+      callback: () => void this.watcher?.retryErrors(),
+    });
+
     this.setupAutoCheck();
+
+    this.watcher = new FolderWatcher(this);
+    // 초기 vault 인덱싱 완료 후 시작 (create 이벤트 폭주 방지)
+    this.app.workspace.onLayoutReady(() => this.watcher?.start());
 
     // 읽기 모드에서 plaud 노트의 [m:ss] 타임스탬프를 클릭 가능하게 — 클릭 시 그 위치 재생
     this.registerMarkdownPostProcessor((el, ctx) => {
@@ -293,6 +336,7 @@ export default class A4PPlaudPlugin extends Plugin {
   async onunload(): Promise<void> {
     setReauthHandler(null);
     closeCallbackServer();
+    this.watcher?.stop();
     if (this.autoCheckTimer !== null) window.clearInterval(this.autoCheckTimer);
     console.log("A4P Plaud unloaded");
   }
@@ -571,5 +615,116 @@ export default class A4PPlaudPlugin extends Plugin {
       this.statusBarEl.style.display = "";
       this.statusBarEl.setText(text);
     }
+  }
+
+  // ─────────────────────────────────────────── 비공식 웹 API 세션 (감시 폴더 업로드용)
+
+  getWebToken(): WebTokenData | null {
+    if (this.webTokenCache) return this.webTokenCache;
+    if (!this.settings.encryptedWebToken || !isEncryptionAvailable()) return null;
+    try {
+      this.webTokenCache = JSON.parse(
+        decryptFromBase64(this.settings.encryptedWebToken)
+      ) as WebTokenData;
+      return this.webTokenCache;
+    } catch {
+      return null;
+    }
+  }
+
+  async setWebToken(t: WebTokenData | null): Promise<void> {
+    this.webTokenCache = t;
+    this.settings.encryptedWebToken = t ? encryptToBase64(JSON.stringify(t)) : null;
+    await this.persistSettings();
+  }
+
+  getWebCreds(): WebCreds | null {
+    if (!this.settings.encryptedWebCreds || !isEncryptionAvailable()) return null;
+    try {
+      return JSON.parse(decryptFromBase64(this.settings.encryptedWebCreds)) as WebCreds;
+    } catch {
+      return null;
+    }
+  }
+
+  async setWebCreds(c: WebCreds | null): Promise<void> {
+    this.settings.encryptedWebCreds = c ? encryptToBase64(JSON.stringify(c)) : null;
+    await this.persistSettings();
+  }
+
+  hasWebAuth(): boolean {
+    return !!this.getWebToken();
+  }
+
+  /** 설정 탭 "연결" 버튼 — 로그인 + 토큰·자격증명 저장 */
+  async webLoginWithCreds(email: string, password: string): Promise<void> {
+    const base = this.settings.webApiBase || PLAUD_WEB_API_DEFAULT_BASE;
+    const token = await webLogin(base, email, password);
+    await this.setWebToken(token);
+    await this.setWebCreds({ email, password });
+    this.watcher?.start();
+  }
+
+  /** 설정 탭 "토큰 직접 붙여넣기" — 비밀번호 저장을 원치 않는 사용자용 */
+  async webSetPastedToken(jwt: string): Promise<void> {
+    await this.setWebToken(tokenDataFromJwt(jwt.trim()));
+    this.watcher?.start();
+  }
+
+  async webLogout(): Promise<void> {
+    this.webTokenCache = null;
+    this.settings.encryptedWebToken = null;
+    this.settings.encryptedWebCreds = null;
+    await this.persistSettings();
+    this.watcher?.start(); // 인증 없음 → 내부에서 대기 상태로 전환
+  }
+
+  /**
+   * 저장된 자격증명으로 재로그인 (single-flight).
+   * ⚠️ Plaud는 새 로그인 시 오래된 세션을 축출할 수 있으므로 만료/401 시에만 호출된다.
+   */
+  private webRelogin(): Promise<WebTokenData | null> {
+    if (this.webReloginPromise) return this.webReloginPromise;
+    this.webReloginPromise = (async () => {
+      const creds = this.getWebCreds();
+      if (!creds) return null;
+      try {
+        const base = this.settings.webApiBase || PLAUD_WEB_API_DEFAULT_BASE;
+        const token = await webLogin(base, creds.email, creds.password);
+        await this.setWebToken(token);
+        return token;
+      } catch (e) {
+        console.error("[A4P Plaud] 웹 재로그인 실패", e);
+        return null;
+      }
+    })();
+    return this.webReloginPromise.finally(() => {
+      this.webReloginPromise = null;
+    });
+  }
+
+  /** 감시 폴더 파이프라인이 쓰는 세션. 인증 정보가 없으면 null. */
+  getWebSession(): WebSession | null {
+    if (!this.hasWebAuth()) return null;
+    return {
+      getToken: async (forceRefresh?: boolean) => {
+        const cur = this.getWebToken();
+        const expiring = !cur || Date.now() > cur.expiresAt - 60_000;
+        if (cur && !forceRefresh && !expiring) return cur.accessToken;
+        const fresh = await this.webRelogin();
+        if (fresh) return fresh.accessToken;
+        // 재로그인 불가(자격증명 없음/실패) — 기존 토큰이라도 있으면 시도해 본다
+        if (cur && !forceRefresh) return cur.accessToken;
+        throw new PlaudWebApiError(
+          "UNAUTHORIZED",
+          "Plaud 웹 연결이 만료되었습니다. 설정에서 다시 연결해 주세요."
+        );
+      },
+      getBase: () => this.settings.webApiBase || PLAUD_WEB_API_DEFAULT_BASE,
+      setBase: async (url: string) => {
+        this.settings.webApiBase = url;
+        await this.persistSettings();
+      },
+    };
   }
 }

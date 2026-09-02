@@ -309,6 +309,10 @@ export async function importRecording(
   const existing = findNoteByPlaudId(app, detail.id);
   if (existing) return { file: existing, existed: true };
 
+  if (!importFolder.trim()) {
+    throw new Error("저장 폴더가 설정되지 않았습니다. 설정 → A4P plaud에서 저장 폴더를 지정해주세요.");
+  }
+
   await ensureFolder(app, importFolder);
   const desired = buildFilePath(importFolder, detail);
   const finalPath = await uniquePath(app, desired);
@@ -363,9 +367,15 @@ export async function saveAudioToVault(
   token: PlaudTokenData,
   detail: PlaudRecordingDetail
 ): Promise<SaveAudioResult> {
-  const folder = normalizePath(
-    settings.audioFolder.trim() || `${settings.importFolder}/audio`
-  );
+  const baseFolder =
+    settings.audioFolder.trim() ||
+    (settings.importFolder.trim() ? `${settings.importFolder}/audio` : "");
+  if (!baseFolder) {
+    throw new Error(
+      "오디오 저장 폴더가 설정되지 않았습니다. 설정 → A4P plaud에서 오디오 저장 폴더(또는 저장 폴더)를 지정해주세요."
+    );
+  }
+  const folder = normalizePath(baseFolder);
   const base = sanitizeFilename(detail.filename || detail.id) || detail.id;
   const path = normalizePath(`${folder}/${base}.mp3`);
 

@@ -78,6 +78,46 @@ export interface PlaudRecordingDetail extends PlaudRecording {
 /** 사이드패널 기간 필터 */
 export type DateRangeFilter = "all" | "today" | "7d" | "30d";
 
+// ─────────────────────────────────────────── 감시 폴더 자동 업로드 (v0.8.0, 비공식 웹 API)
+
+/**
+ * 비공식 웹 API(api.plaud.ai)용 토큰. 공식 OAuth(PlaudTokenData)와 완전 별개 —
+ * 웹앱 로그인과 같은 JWT이며, 만료 시 저장된 자격증명으로 재로그인한다.
+ */
+export interface WebTokenData {
+  accessToken: string;
+  /** JWT exp (epoch ms). 디코드 실패 시 발급 시점 + 25일로 추정 */
+  expiresAt: number;
+  issuedAt: number;
+}
+
+export type WatchLedgerStatus =
+  | "pending"
+  | "uploading"
+  | "analyzing"
+  | "done"
+  | "error"
+  | "skipped";
+
+/** 감시 폴더에서 처리한 파일 기록 — 재업로드 방지 + 재시작 복구용 */
+export interface WatchLedgerEntry {
+  /** vault 상대경로 또는 외부 절대경로 (key와 동일) */
+  path: string;
+  size: number;
+  mtime: number;
+  /** confirm_upload가 반환한 Plaud file id */
+  fileId?: string;
+  status: WatchLedgerStatus;
+  error?: string;
+  retries: number;
+  /** 이 시각 전에는 재시도하지 않음 (백오프) */
+  nextRetryAt?: number;
+  uploadedAt?: number;
+  doneAt?: number;
+  /** 임포트된 노트 경로 */
+  notePath?: string;
+}
+
 export type SttProvider = "groq" | "openai";
 
 export interface PlaudSettings {
@@ -106,11 +146,32 @@ export interface PlaudSettings {
   audioFolder: string;
   /** 새 녹음 자동 감지 주기(분). 0 = 끔 */
   autoCheckMinutes: number;
+  // ── 감시 폴더 자동 업로드 (비공식 웹 API) ──
+  /** 기능 전체 on/off */
+  watchEnabled: boolean;
+  /** vault 안 감시 폴더 (빈 문자열 = 미사용) */
+  watchVaultFolder: string;
+  /** vault 밖 감시 폴더 절대경로 — iCloud Drive 등 (빈 문자열 = 미사용) */
+  watchExternalFolder: string;
+  /** 외부 폴더 확인 주기(초) */
+  watchPollSeconds: number;
+  /** Plaud 전사 언어 (BCP-47 계열, 예: ko) */
+  watchLanguage: string;
+  /** 전사 완료 시 자동으로 노트 임포트 */
+  watchAutoImport: boolean;
+  /** safeStorage로 암호화한 WebTokenData JSON */
+  encryptedWebToken: string | null;
+  /** safeStorage로 암호화한 {email,password} JSON — 토큰 만료 시 자동 재로그인용(선택) */
+  encryptedWebCreds: string | null;
+  /** 비공식 웹 API base (-302 리전 리다이렉트 시 자동 갱신) */
+  webApiBase: string;
+  /** 처리된 파일 ledger */
+  watchLedger: Record<string, WatchLedgerEntry>;
 }
 
 export const DEFAULT_SETTINGS: PlaudSettings = {
   encryptedToken: null,
-  importFolder: "Plaud",
+  importFolder: "",
   templatePath: "",
   sttProvider: "groq",
   encryptedGroqKey: null,
@@ -123,6 +184,16 @@ export const DEFAULT_SETTINGS: PlaudSettings = {
   autoSttOnImport: false,
   audioFolder: "",
   autoCheckMinutes: 0,
+  watchEnabled: false,
+  watchVaultFolder: "",
+  watchExternalFolder: "",
+  watchPollSeconds: 60,
+  watchLanguage: "ko",
+  watchAutoImport: true,
+  encryptedWebToken: null,
+  encryptedWebCreds: null,
+  webApiBase: "https://api.plaud.ai",
+  watchLedger: {},
 };
 
 /** 공급자별 최대 파일 크기 (바이트) */

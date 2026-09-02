@@ -1,13 +1,19 @@
 {
   "name": "a4p-plaud",
-  "version": "0.7.0",
-  "description": "Plaud recordings & transcripts inside Obsidian (read-only) with sidebar streaming player",
+  "version": "0.8.0",
+  "description": "Plaud recordings & transcripts inside Obsidian with sidebar streaming player and watched-folder auto upload",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
   },
-  "keywords": ["obsidian", "plaud", "plugin", "transcript", "audio"],
+  "keywords": [
+    "obsidian",
+    "plaud",
+    "plugin",
+    "transcript",
+    "audio"
+  ],
   "author": "abadcsh",
   "license": "MIT",
   "devDependencies": {

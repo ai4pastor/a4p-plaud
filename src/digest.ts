@@ -63,6 +63,9 @@ export async function createDigestNote(
 ): Promise<TFile> {
   const token = plugin.getToken();
   if (!token) throw new Error("로그인되지 않았습니다.");
+  if (!plugin.settings.importFolder.trim()) {
+    throw new Error("저장 폴더가 설정되지 않았습니다. 설정 → A4P plaud에서 저장 폴더를 지정해주세요.");
+  }
 
   const cutoff = Date.now() - days * 86400000;
   const all = await listRecordings(token);

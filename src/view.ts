@@ -494,6 +494,10 @@ export class PlaudListView extends ItemView {
       new Notice("미임포트 녹음이 없습니다.");
       return;
     }
+    if (!this.plugin.settings.importFolder.trim()) {
+      new Notice("저장 폴더가 설정되지 않았습니다. 설정 → A4P plaud에서 저장 폴더를 지정해주세요.");
+      return;
+    }
     const tplNote = this.plugin.settings.templatePath
       ? "\n(설정된 Templater 템플릿이 각 노트에 적용됩니다)"
       : "";
