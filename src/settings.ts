@@ -658,7 +658,7 @@ export class PlaudSettingTab extends PluginSettingTab {
     guide.style.fontSize = "0.88em";
     guide.style.lineHeight = "1.55";
     guide.setText(
-      "업로드에는 Plaud 웹 계정 연결이 필요합니다 (위의 공식 로그인과 별개). " +
+      "업로드, 그리고 새 녹음(서버에 mp3 변환본이 아직 없고 기기 원본 .opus만 있는 파일)의 재생·저장에 쓰는 mp3 변환본 요청에는 Plaud 웹 계정 연결이 필요합니다 (위의 공식 로그인과 별개). " +
         "이메일/비밀번호는 OS 키체인으로 암호화 저장되며 토큰 만료 시 자동 재로그인에만 사용됩니다. " +
         "⚠️ 로그인 시 다른 기기의 Plaud 웹 세션이 로그아웃될 수 있습니다."
     );

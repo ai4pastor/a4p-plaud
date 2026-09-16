@@ -438,6 +438,37 @@ export async function saveAnalysisResults(
   });
 }
 
+// ─────────────────────────────────────────── 재생용 임시 URL (mp3 변환본)
+
+/** 공식 API id(`of_<hex>`) → 웹 API 파일 id(hex). 접두어가 없으면 그대로. */
+export function toWebFileId(id: string): string {
+  return id.replace(/^[a-z]+_/i, "");
+}
+
+/**
+ * 웹앱이 재생에 쓰는 임시 URL — `is_opus=false`면 서버의 mp3 변환본 URL을 준다.
+ * 2026-09부터 공식 API의 presigned_url이 기기 원본(.opus 혼합 컨테이너)을 가리키는 파일의 재생·저장 대안.
+ * (출처: 비공식 클라이언트 plaud-toolkit `GET /file/temp-url/{id}?is_opus=false`, plaud-api `temp_url`)
+ */
+export async function getWebAudioUrl(
+  session: WebSession,
+  fileId: string,
+  opus = false
+): Promise<string | null> {
+  const json = await webRequest(
+    session,
+    `/file/temp-url/${encodeURIComponent(fileId)}?is_opus=${opus ? "true" : "false"}`
+  );
+  const o = obj(json);
+  const d = obj(o.data);
+  const cands: unknown[] = [o.temp_url, o.url, d.temp_url, d.url, typeof o.data === "string" ? o.data : undefined];
+  for (const c of cands) {
+    if (typeof c === "string" && /^https?:\/\//.test(c)) return c;
+  }
+  console.warn("[A4P Plaud] temp-url 응답 형식 불일치", json);
+  return null;
+}
+
 // ─────────────────────────────────────────── 조회 (임포트 폴백용)
 
 /** 파일 raw 조회 — POST /file/list에 id 배열 */

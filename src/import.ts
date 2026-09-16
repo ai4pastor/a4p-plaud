@@ -3,7 +3,9 @@ import { PlaudRecordingDetail, PlaudRegion, PlaudSettings, PlaudTokenData, SttRe
 import { formatDuration, formatStartTime } from "./format";
 import { convertBibleRefsInNote } from "./bible";
 import { getMp3Url } from "./api";
-import { downloadMp3 } from "./stt";
+import { downloadAudio } from "./stt";
+import { extractOggOpus, inspectAudioBytes } from "./plaudaudio";
+import { getWebAudioUrl, toWebFileId, WebSession } from "./webapi";
 
 /** 플러그인 소유 본문 구간 마커 — 재동기화 시 이 사이만 교체한다 */
 export const PLAUD_CONTENT_START = "<!-- plaud:content:start -->";
@@ -353,19 +355,37 @@ export interface SaveAudioResult {
   existed: boolean;
   /** 임포트 노트에 임베드를 추가했는지 */
   embedded: boolean;
+  /** 저장 형식 — mp3(서버 원본/웹 변환본) · ogg(기기 원본에서 Ogg Opus 재조립) · original(그대로 저장, 재생 불가 가능) */
+  format: "mp3" | "ogg" | "original";
+  /** 사용자에게 함께 알릴 주의 문구 */
+  warning?: string;
+}
+
+const AUDIO_SAVE_EXTS = ["mp3", "ogg", "opus", "m4a", "wav"];
+
+function extFromUrl(url: string): string {
+  try {
+    const ext = new URL(url).pathname.split(".").pop()?.toLowerCase() ?? "";
+    return /^[a-z0-9]{2,5}$/.test(ext) ? ext : "";
+  } catch {
+    return "";
+  }
 }
 
 /**
- * 녹음 오디오(mp3)를 볼트에 저장한다.
+ * 녹음 오디오를 볼트에 저장한다.
  * - 저장 폴더: settings.audioFolder (비어 있으면 "{importFolder}/audio")
- * - 같은 파일이 이미 있으면 재다운로드하지 않는다.
+ * - 같은 파일이 이미 있으면(확장자 무관) 재다운로드하지 않는다.
+ * - 서버가 mp3를 주면 그대로, 기기 원본(.opus 혼합 컨테이너)이면 Ogg Opus로 재조립해 .ogg로,
+ *   재조립이 불가하면 웹 세션이 있을 때 mp3 변환본을 받아 저장한다.
  * - 임포트된 노트가 있고 아직 임베드가 없으면 본문 끝에 ![[...]] 추가.
  */
 export async function saveAudioToVault(
   app: App,
   settings: Pick<PlaudSettings, "audioFolder" | "importFolder">,
   token: PlaudTokenData,
-  detail: PlaudRecordingDetail
+  detail: PlaudRecordingDetail,
+  webSession?: WebSession | null
 ): Promise<SaveAudioResult> {
   const baseFolder =
     settings.audioFolder.trim() ||
@@ -377,30 +397,72 @@ export async function saveAudioToVault(
   }
   const folder = normalizePath(baseFolder);
   const base = sanitizeFilename(detail.filename || detail.id) || detail.id;
-  const path = normalizePath(`${folder}/${base}.mp3`);
 
+  let path = "";
   let existed = false;
-  if (app.vault.getAbstractFileByPath(path)) {
+  let format: SaveAudioResult["format"] = "mp3";
+  let warning: string | undefined;
+
+  const already = AUDIO_SAVE_EXTS.map((e) => normalizePath(`${folder}/${base}.${e}`)).find((p) =>
+    app.vault.getAbstractFileByPath(p)
+  );
+  if (already) {
+    path = already;
     existed = true;
+    format = already.endsWith(".ogg") ? "ogg" : already.endsWith(".mp3") ? "mp3" : "original";
   } else {
     const url = await getMp3Url(token, detail.id);
     if (!url) throw new Error("오디오 URL을 받지 못했습니다. (오디오가 없는 녹음일 수 있습니다)");
-    const audio = await downloadMp3(url);
+    const dl = await downloadAudio(url);
+    let data = dl.data;
+    let ext = extFromUrl(url) || (dl.contentType.includes("mpeg") ? "mp3" : "bin");
+    const info = inspectAudioBytes(data);
+    console.log("[A4P Plaud] 오디오 저장 — 바이트 검사", { id: detail.id, contentType: dl.contentType, ext, ...info });
+    if (ext === "mp3" || dl.contentType.includes("mpeg")) {
+      ext = "mp3";
+      format = "mp3";
+    } else if (info.oggPages > 0 && extractOggOpus(data)) {
+      // 기기 원본 혼합 컨테이너 → 표준 Ogg Opus로 재조립 (옵시디언 임베드 재생 가능)
+      data = (extractOggOpus(data) as { ogg: ArrayBuffer }).ogg;
+      ext = "ogg";
+      format = "ogg";
+    } else if (webSession) {
+      // 재조립 불가(암호화 등) → 웹 API mp3 변환본
+      try {
+        const mp3 = await getWebAudioUrl(webSession, toWebFileId(detail.id), false);
+        if (mp3) {
+          data = (await downloadAudio(mp3)).data;
+          ext = "mp3";
+          format = "mp3";
+        }
+      } catch (e) {
+        console.warn("[A4P Plaud] 웹 API mp3 변환본 실패 — 원본 그대로 저장", e);
+      }
+      if (format !== "mp3") {
+        format = "original";
+        warning = "⚠️ 기기 원본 형식 그대로 저장했습니다 — 옵시디언에서 재생되지 않을 수 있습니다.";
+      }
+    } else {
+      format = "original";
+      warning =
+        "⚠️ 기기 원본 형식 그대로 저장했습니다 — 재생되지 않으면 설정의 'Plaud 웹 계정'을 연결한 뒤 다시 저장하세요 (mp3 변환본).";
+    }
+    path = normalizePath(`${folder}/${base}.${ext}`);
     await ensureFolder(app, folder);
-    await app.vault.createBinary(path, audio);
+    await app.vault.createBinary(path, data);
   }
 
-  // 임포트 노트가 있으면 임베드 추가 (중복 방지)
+  // 임포트 노트가 있으면 임베드 추가 (중복 방지 — 확장자가 달라도 같은 이름이면 있는 것으로 본다)
   let embedded = false;
   const note = findNoteByPlaudId(app, detail.id);
   if (note) {
     const raw = await app.vault.read(note);
-    if (!raw.includes(`![[${path}]]`) && !raw.includes(`![[${base}.mp3]]`)) {
+    if (!raw.includes(`![[${path}]]`) && !raw.includes(`![[${base}.`)) {
       await app.vault.modify(note, `${raw.trimEnd()}\n\n![[${path}]]\n`);
       embedded = true;
     }
   }
-  return { path, existed, embedded };
+  return { path, existed, embedded, format, warning };
 }
 
 export interface ResyncResult {

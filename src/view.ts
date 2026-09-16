@@ -10,9 +10,9 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import type A4PPlaudPlugin from "./main";
-import { getMp3Url, getRecordingDetail, listRecordings, msToClock, PlaudApiError } from "./api";
+import { getMp3Url, getRecordingDetail, idFormat, listRecordings, msToClock, PlaudApiError } from "./api";
 import { PlaudAuthError } from "./auth";
-import { formatDuration, formatStartTime } from "./format";
+import { describeUrl, formatDuration, formatStartTime } from "./format";
 import { findNoteByPlaudId, importRecording } from "./import";
 import {
   DateRangeFilter,
@@ -22,8 +22,19 @@ import {
   STT_MAX_FILE_SIZE,
   SttResult,
 } from "./types";
-import { downloadMp3, SttError, transcribeAudio } from "./stt";
+import {
+  AudioProbe,
+  downloadAudio,
+  downloadMp3,
+  guessAudioMime,
+  probeAudioUrl,
+  sniffAudioHead,
+  SttError,
+  transcribeAudio,
+} from "./stt";
 import { saveAudioToVault } from "./import";
+import { extractOggOpus, inspectAudioBytes } from "./plaudaudio";
+import { getWebAudioUrl, toWebFileId } from "./webapi";
 
 /** 세션 동안 plaud_id → STT 결과 캐시 (모달 닫혀도 유지) */
 const sttCache: Map<string, SttResult> = new Map();
@@ -31,6 +42,9 @@ const sttCache: Map<string, SttResult> = new Map();
 const sttInProgress: Map<string, string> = new Map();
 
 export const PLAUD_VIEW_TYPE = "a4p-plaud-list-view";
+
+/** <audio> 로드 실패 시 원본 URL을 새로 받아 재시도하는 횟수 상한 (초과 시 진단·폴백) */
+const PLAY_MAX_RETRIES = 1;
 
 /**
  * 자동 STT: 설정이 켜져 있고 전사가 없으면 외부 STT를 실행해 결과를 반환한다.
@@ -103,6 +117,18 @@ export class PlaudListView extends ItemView {
   private sortBtnEl: HTMLButtonElement | null = null;
   private batchBtnEl: HTMLButtonElement | null = null;
   private batchRunning = false;
+  /** plaud_id → 재생 URL 갱신 재시도 횟수 (상한 PLAY_MAX_RETRIES — 무한 순환 방지) */
+  private playRetries: Map<string, number> = new Map();
+  /** 현재 <audio>에 물린 원본(서버) URL — 진단·폴백용 */
+  private currentAudioUrl: string | null = null;
+  /** 폴백(전체 다운로드) 재생용 object URL — 교체·종료 시 revoke */
+  private blobUrl: string | null = null;
+  /** 마지막 URL 프로브 결과 — 폴백까지 실패했을 때 안내 문구에 사용 */
+  private lastProbe: AudioProbe | null = null;
+  /** error 이벤트 중복 진입 방지 */
+  private handlingAudioError = false;
+  /** 폴백 단계 — none: 서버 URL 직접 스트리밍, blob: 전체 수신(+Ogg 재조립) 재생, web: 웹 API mp3 변환본 */
+  private fallbackStage: "none" | "blob" | "web" = "none";
 
   constructor(leaf: WorkspaceLeaf, plugin: A4PPlaudPlugin) {
     super(leaf);
@@ -228,15 +254,7 @@ export class PlaudListView extends ItemView {
   }
 
   async onClose(): Promise<void> {
-    if (this.audioEl) {
-      try {
-        this.audioEl.pause();
-        this.audioEl.removeAttribute("src");
-        this.audioEl.load();
-      } catch {
-        // ignore
-      }
-    }
+    this.resetAudioSrc();
     this.audioEl = null;
     this.playButton = null;
     this.playerContainer = null;
@@ -284,15 +302,8 @@ export class PlaudListView extends ItemView {
       if (id) this.highlightCardForId(id, true);
       return;
     }
-    if (this.audioEl) {
-      try {
-        this.audioEl.pause();
-        this.audioEl.removeAttribute("src");
-        this.audioEl.load();
-      } catch {
-        // ignore
-      }
-    }
+    this.resetAudioSrc();
+    this.playRetries.clear();
     this.currentPlaudId = id;
     if (!id) {
       this.renderPlayerEmpty();
@@ -372,9 +383,62 @@ export class PlaudListView extends ItemView {
     audio.addEventListener("pause", () => {
       if (this.playButton) this.playButton.setText("▶ 재생");
     });
-    audio.addEventListener("error", () => {
-      if (id === this.currentPlaudId) void this.handleAudioError(id);
+    // 실제로 소리가 나기 시작하면 재시도 카운터 초기화 (다음 만료 때 다시 1회 갱신 허용)
+    audio.addEventListener("playing", () => {
+      this.playRetries.delete(id);
     });
+    audio.addEventListener("error", () => {
+      if (id !== this.currentPlaudId) return;
+      const err = audio.error;
+      console.warn("[A4P Plaud] media error", {
+        id,
+        idFormat: idFormat(id),
+        code: err?.code,
+        message: err?.message,
+        stage: this.fallbackStage,
+        src: audio.src.startsWith("blob:") ? "blob:(폴백)" : this.currentAudioUrl ? describeUrl(this.currentAudioUrl) : audio.src,
+      });
+      void this.handleAudioError(id);
+    });
+  }
+
+  /** <audio>의 src를 비우고 폴백용 object URL을 회수한다 (id 전환·뷰 종료 시) */
+  private resetAudioSrc(): void {
+    if (this.audioEl) {
+      try {
+        this.audioEl.pause();
+        this.audioEl.removeAttribute("src");
+        this.audioEl.load();
+      } catch {
+        // ignore
+      }
+    }
+    this.revokeBlobUrl();
+    this.currentAudioUrl = null;
+    this.lastProbe = null;
+    this.fallbackStage = "none";
+  }
+
+  private revokeBlobUrl(): void {
+    if (this.blobUrl) {
+      try {
+        URL.revokeObjectURL(this.blobUrl);
+      } catch {
+        // ignore
+      }
+      this.blobUrl = null;
+    }
+  }
+
+  /** 메타데이터가 로드되면 지정 위치로 한 번 점프 */
+  private seekOnceWhenReady(resumeAt: number): void {
+    if (!this.audioEl || resumeAt <= 0) return;
+    const el = this.audioEl;
+    const seekHandler = () => {
+      el.currentTime = resumeAt;
+      el.removeEventListener("loadedmetadata", seekHandler);
+    };
+    el.addEventListener("loadedmetadata", seekHandler);
   }
 
   private async togglePlay(id: string): Promise<void> {
@@ -394,13 +458,17 @@ export class PlaudListView extends ItemView {
     }
   }
 
-  private async loadAndPlay(id: string, resumeAt: number): Promise<void> {
+  /**
+   * 서버 URL을 새로 받아 <audio>에 물리고 재생한다.
+   * 반환: ok(재생 시작) · load-failed(미디어 로드 실패 — 호출자가 폴백 판단) · other(로그인/URL 없음/중단 등)
+   */
+  private async loadAndPlay(id: string, resumeAt: number): Promise<"ok" | "load-failed" | "other"> {
     const token = this.plugin.getToken();
     if (!token) {
       new Notice("로그인되지 않았습니다.");
-      return;
+      return "other";
     }
-    if (!this.audioEl) return;
+    if (!this.audioEl) return "other";
     const btn = this.playButton;
     if (btn) btn.setText("로딩...");
     try {
@@ -408,29 +476,217 @@ export class PlaudListView extends ItemView {
       if (!url) {
         new Notice("mp3 URL을 받지 못했습니다. (전사·요약 처리 중이거나 권한 문제일 수 있습니다)");
         if (btn) btn.setText("▶ 재생");
+        return "other";
+      }
+      this.revokeBlobUrl();
+      this.fallbackStage = "none";
+      this.currentAudioUrl = url;
+      this.audioEl.src = url;
+      this.seekOnceWhenReady(resumeAt);
+      await this.audioEl.play();
+      return "ok";
+    } catch (e) {
+      const err = e as Error;
+      // src 교체로 중단된 play()는 정상 흐름
+      if (err?.name === "AbortError") return "other";
+      // 미디어 로드 실패 — 호출자가 handleAudioError면 반환값으로, 아니면 error 이벤트로 폴백이 이어진다
+      if (this.audioEl?.error || err?.name === "NotSupportedError") {
+        console.warn("[A4P Plaud] play() 거부 — 미디어 로드 실패", err?.message);
+        return "load-failed";
+      }
+      new Notice(`재생 실패: ${err?.message ?? "unknown"}`);
+      if (btn) btn.setText("▶ 재생");
+      return "other";
+    }
+  }
+
+  /**
+   * <audio> 로드 실패 처리.
+   * 1) 원본 URL 1회 갱신 재시도(만료 대응) → 2) 그래도 실패면 Node 측 프로브로 원인 확정 →
+   * 서버 정상(2xx)이면 전체 다운로드 후 Blob 재생 폴백, 4xx/5xx면 상태코드를 안내하고 종료.
+   * 폴백(blob:) 재생조차 실패하면 형식 문제로 안내하고 더 시도하지 않는다.
+   */
+  private async handleAudioError(id: string): Promise<void> {
+    const audio = this.audioEl;
+    if (!audio || !audio.src) return;
+    if (this.handlingAudioError) return;
+    this.handlingAudioError = true;
+    const btn = this.playButton;
+    try {
+      const lastTime = audio.currentTime;
+      if (this.fallbackStage === "web") {
+        // 재생 중 mp3 변환본 URL이 만료된 경우 1회만 새로 받아 이어 재생
+        const webKey = `${id}:web`;
+        const webTries = this.playRetries.get(webKey) ?? 0;
+        if (webTries < PLAY_MAX_RETRIES) {
+          this.playRetries.set(webKey, webTries + 1);
+          await this.tryWebMp3(id, lastTime, "mp3 변환본 URL이 만료된 것 같습니다");
+          return;
+        }
+        this.noticeFinalFailure("웹 API의 mp3 변환본도 재생되지 않았습니다");
         return;
       }
-      this.audioEl.src = url;
-      if (resumeAt > 0) {
-        const seekHandler = () => {
-          if (this.audioEl) this.audioEl.currentTime = resumeAt;
-          this.audioEl?.removeEventListener("loadedmetadata", seekHandler);
-        };
-        this.audioEl.addEventListener("loadedmetadata", seekHandler);
+      if (this.fallbackStage === "blob") {
+        // 전체 수신(+재조립) 재생도 실패 → 웹 API mp3 변환본
+        await this.tryWebMp3(id, lastTime, "브라우저가 재생할 수 없는 오디오 형식입니다");
+        return;
       }
-      await this.audioEl.play();
+      const tries = this.playRetries.get(id) ?? 0;
+      if (tries < PLAY_MAX_RETRIES) {
+        this.playRetries.set(id, tries + 1);
+        new Notice(`재생 URL을 갱신해 다시 시도합니다 (${tries + 1}/${PLAY_MAX_RETRIES})`);
+        // 플래그를 유지한 채 재시도 — 그 사이 error 이벤트는 무시하고 반환값으로 판단한다 (폴백 중복 실행 방지)
+        const r = await this.loadAndPlay(id, lastTime);
+        if (r !== "load-failed") return;
+      }
+      await this.diagnoseAndFallback(id, this.currentAudioUrl, lastTime);
+    } finally {
+      this.handlingAudioError = false;
+    }
+  }
+
+  private async diagnoseAndFallback(id: string, url: string | null, resumeAt: number): Promise<void> {
+    const audio = this.audioEl;
+    const btn = this.playButton;
+    if (!audio) return;
+    if (!url) {
+      new Notice("재생 실패: 오디오 URL이 없습니다.");
+      if (btn) btn.setText("▶ 재생");
+      return;
+    }
+    if (btn) btn.setText("진단 중...");
+    const probe = await probeAudioUrl(url);
+    this.lastProbe = probe;
+    console.warn("[A4P Plaud] 오디오 URL 프로브", {
+      id,
+      idFormat: idFormat(id),
+      url: describeUrl(url),
+      status: probe?.status,
+      contentType: probe?.contentType,
+      contentLength: probe?.contentLength,
+    });
+    if (!probe) {
+      new Notice("재생 실패: 오디오 서버에 연결할 수 없습니다. 인터넷 연결을 확인해 주세요.", 8000);
+      if (btn) btn.setText("▶ 재생");
+      return;
+    }
+    if (probe.status >= 400) {
+      const hint =
+        idFormat(id) !== "hex"
+          ? ` — Plaud가 새 형식 ID(${idFormat(id)}…)의 오디오 URL을 거부했습니다. Plaud 측 변경일 수 있습니다.`
+          : " — 재생 URL이 거부되었습니다.";
+      new Notice(`재생 실패: 오디오 URL 응답 HTTP ${probe.status}${hint}`, 12000);
+      if (btn) btn.setText("▶ 재생");
+      return;
+    }
+
+    // 파일 머리로 컨테이너 판별 — 암호화된 기기 원본(PLAUD.AI)은 내려받아도 못 풀므로 바로 mp3 변환본으로
+    const kind = sniffAudioHead(probe.head);
+    console.log("[A4P Plaud] 오디오 컨테이너 판별", { id, kind, head: Array.from(probe.head.subarray(0, 16), (x) => x.toString(16).padStart(2, "0")).join(" ") });
+    if (kind === "plaud-encrypted") {
+      await this.tryWebMp3(id, resumeAt, "Plaud 기기 원본(암호화 컨테이너)은 브라우저가 재생할 수 없습니다");
+      return;
+    }
+
+    // 서버는 정상인데 브라우저 스트리밍만 막힌 경우 → 전체 수신 후 Blob으로 재생
+    const mb = probe.contentLength ? ` (${(probe.contentLength / 1048576).toFixed(1)} MB)` : "";
+    if (btn) btn.setText(`다운로드 후 재생${mb}...`);
+    new Notice(`스트리밍이 막혀 오디오 전체를 내려받은 뒤 재생합니다${mb}`);
+    try {
+      let data: ArrayBuffer;
+      let contentType = probe.contentType;
+      if (probe.fullBody) {
+        data = probe.fullBody;
+      } else {
+        const dl = await downloadAudio(url);
+        data = dl.data;
+        contentType = dl.contentType || contentType;
+      }
+      let type = contentType.startsWith("audio/") ? contentType : guessAudioMime(url) ?? "audio/mpeg";
+      // Plaud 기기 원본(.opus 혼합 컨테이너)이면 Ogg 페이지만 골라 표준 Ogg Opus로 재조립
+      const info = inspectAudioBytes(data);
+      console.log("[A4P Plaud] 오디오 바이트 검사", { id, contentType, ...info });
+      if (info.oggPages > 0) {
+        const ex = extractOggOpus(data);
+        if (ex && !ex.alreadyClean) {
+          console.log("[A4P Plaud] Ogg Opus 재조립", {
+            keptPages: ex.keptPages,
+            droppedPages: ex.droppedPages,
+            junkBytes: ex.junkBytes,
+            bytes: ex.ogg.byteLength,
+          });
+          data = ex.ogg;
+          type = "audio/ogg";
+        } else if (ex) {
+          type = "audio/ogg";
+        }
+      }
+      this.revokeBlobUrl();
+      this.fallbackStage = "blob";
+      this.blobUrl = URL.createObjectURL(new Blob([data], { type }));
+      audio.src = this.blobUrl;
+      this.seekOnceWhenReady(resumeAt);
+      await audio.play();
+      console.log("[A4P Plaud] 폴백 재생 시작", { id, type, bytes: data.byteLength });
     } catch (e) {
-      new Notice(`재생 실패: ${(e as Error).message ?? "unknown"}`);
+      const err = e as Error;
+      if (err?.name === "AbortError") return;
+      if (audio.error || err?.name === "NotSupportedError") {
+        // Blob(재조립 포함) 재생 불가 → 웹 API mp3 변환본으로
+        await this.tryWebMp3(id, resumeAt, "브라우저가 재생할 수 없는 오디오 형식입니다");
+        return;
+      }
+      new Notice(`재생 실패: ${err?.message ?? "unknown"}`, 8000);
       if (btn) btn.setText("▶ 재생");
     }
   }
 
-  private async handleAudioError(id: string): Promise<void> {
-    if (!this.audioEl) return;
-    const lastTime = this.audioEl.currentTime;
-    if (!this.audioEl.src) return;
-    new Notice("재생 URL이 만료된 것 같습니다. 갱신해 다시 시도합니다.");
-    await this.loadAndPlay(id, lastTime);
+  /**
+   * 마지막 폴백 — 웹앱이 쓰는 `GET /file/temp-url/{id}?is_opus=false`로 mp3 변환본 URL을 받아 스트리밍.
+   * 웹 연결이 없으면 설정 안내로 끝난다. 이 단계에서도 실패하면 더 시도하지 않는다.
+   */
+  private async tryWebMp3(id: string, resumeAt: number, reason: string): Promise<void> {
+    const audio = this.audioEl;
+    const btn = this.playButton;
+    if (!audio) return;
+    const session = this.plugin.getWebSession();
+    if (!session) {
+      this.noticeFinalFailure(
+        `${reason}. 설정 → A4P plaud → '감시 폴더 자동 업로드' 섹션의 'Plaud 웹 계정'을 연결해 두면 mp3 변환본으로 자동 재생됩니다`
+      );
+      return;
+    }
+    if (btn) btn.setText("mp3 변환본 요청...");
+    try {
+      const webId = toWebFileId(id);
+      const url = await getWebAudioUrl(session, webId, false);
+      console.log("[A4P Plaud] 웹 API mp3 임시 URL", { id, webId, url: url ? describeUrl(url) : null });
+      if (!url) {
+        this.noticeFinalFailure(`${reason}. 웹 API에서도 mp3 URL을 받지 못했습니다`);
+        return;
+      }
+      this.revokeBlobUrl();
+      this.fallbackStage = "web";
+      this.currentAudioUrl = url;
+      audio.src = url;
+      this.seekOnceWhenReady(resumeAt);
+      await audio.play();
+      new Notice("서버 mp3 변환본으로 재생합니다.");
+    } catch (e) {
+      const err = e as Error;
+      if (err?.name === "AbortError") return;
+      this.noticeFinalFailure(
+        audio.error || err?.name === "NotSupportedError"
+          ? "웹 API의 mp3 변환본도 재생되지 않았습니다"
+          : `mp3 변환본 요청 실패 — ${err?.message ?? "unknown"}`
+      );
+    }
+  }
+
+  private noticeFinalFailure(reason: string): void {
+    const ct = this.lastProbe?.contentType || "알 수 없음";
+    new Notice(`재생 실패: ${reason} (content-type: ${ct}). 콘솔의 [A4P Plaud] 로그를 확인해 주세요.`, 12000);
+    if (this.playButton) this.playButton.setText("▶ 재생");
   }
 
   /** 현재 오디오가 재생 중인지 */
@@ -923,12 +1179,19 @@ class PlaudDetailModal extends Modal {
       btn.setAttr("disabled", "true");
       btn.setText("다운로드 중...");
       try {
-        const res = await saveAudioToVault(this.app, this.plugin.settings, token, detail);
+        const res = await saveAudioToVault(
+          this.app,
+          this.plugin.settings,
+          token,
+          detail,
+          this.plugin.getWebSession()
+        );
         new Notice(
           res.existed
             ? `이미 저장됨: ${res.path}`
             : `🔊 오디오 저장 완료: ${res.path}${res.embedded ? "\n(노트에 임베드 추가)" : ""}`
         );
+        if (res.warning) new Notice(res.warning, 10000);
         btn.setText("🔊 저장됨");
       } catch (e) {
         new Notice(`오디오 저장 실패: ${(e as Error).message ?? "unknown"}`);

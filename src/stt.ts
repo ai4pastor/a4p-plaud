@@ -29,18 +29,109 @@ export interface ProgressCallback {
   (stage: "download" | "upload" | "done", info?: { bytes?: number; total?: number }): void;
 }
 
-export async function downloadMp3(url: string, onProgress?: ProgressCallback): Promise<ArrayBuffer> {
+function headerOf(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === lower) return headers[k];
+  }
+  return undefined;
+}
+
+/** 오디오 전체 수신 — Node 측(requestUrl)이라 브라우저 미디어 로더의 제약(헤더·CORS·Content-Type)을 받지 않는다. */
+export async function downloadAudio(
+  url: string,
+  onProgress?: ProgressCallback
+): Promise<{ data: ArrayBuffer; contentType: string }> {
   onProgress?.("download");
   try {
     const res = await requestUrl({ url, method: "GET", throw: false });
     if (res.status >= 400) {
       throw new SttError("DOWNLOAD_FAILED", `mp3 다운로드 실패 (HTTP ${res.status})`);
     }
-    return res.arrayBuffer;
+    return { data: res.arrayBuffer, contentType: (headerOf(res.headers, "content-type") ?? "").toLowerCase() };
   } catch (e) {
     if (e instanceof SttError) throw e;
     throw new SttError("DOWNLOAD_FAILED", "mp3 다운로드 중 네트워크 오류가 발생했습니다.");
   }
+}
+
+export async function downloadMp3(url: string, onProgress?: ProgressCallback): Promise<ArrayBuffer> {
+  return (await downloadAudio(url, onProgress)).data;
+}
+
+export interface AudioProbe {
+  status: number;
+  /** 소문자 content-type (없으면 "") */
+  contentType: string;
+  /** 전체 길이(bytes) — Content-Range 또는 Content-Length. 모르면 null */
+  contentLength: number | null;
+  /** 서버가 Range를 무시하고 전체를 보냈으면 그 본문 (재다운로드 방지) */
+  fullBody?: ArrayBuffer;
+  /** 파일 머리(최대 64바이트) — 컨테이너 판별용 */
+  head: Uint8Array;
+}
+
+/** 파일 머리로 컨테이너 판별 */
+export function sniffAudioHead(head: Uint8Array): "ogg" | "plaud-encrypted" | "mp3" | "unknown" {
+  const ascii = (n: number) => String.fromCharCode(...Array.from(head.subarray(0, n)));
+  if (head.length >= 4 && ascii(4) === "OggS") return "ogg";
+  if (head.length >= 8 && ascii(8) === "PLAUD.AI") return "plaud-encrypted";
+  if (head.length >= 3 && (ascii(3) === "ID3" || (head[0] === 0xff && (head[1] & 0xe0) === 0xe0))) return "mp3";
+  return "unknown";
+}
+
+/**
+ * 오디오 URL이 살아 있는지 Node 측으로 확인 — HTTP 상태·Content-Type·길이를 회수한다.
+ * <audio>가 "no supported source"로 실패했을 때 서버 거부(4xx)인지 형식 문제인지 가르는 용도.
+ * 네트워크 자체가 안 되면 null. 절대 throw하지 않는다.
+ */
+export async function probeAudioUrl(url: string): Promise<AudioProbe | null> {
+  try {
+    const res = await requestUrl({
+      url,
+      method: "GET",
+      headers: { Range: "bytes=0-63" },
+      throw: false,
+    });
+    const range = headerOf(res.headers, "content-range");
+    const lenRaw = range?.split("/")[1] ?? headerOf(res.headers, "content-length");
+    const contentLength = lenRaw && !isNaN(Number(lenRaw)) ? Number(lenRaw) : null;
+    const probe: AudioProbe = {
+      status: res.status,
+      contentType: (headerOf(res.headers, "content-type") ?? "").toLowerCase(),
+      contentLength: res.status === 206 ? contentLength : res.status === 200 ? res.arrayBuffer.byteLength : contentLength,
+      head: new Uint8Array(res.arrayBuffer).subarray(0, 64),
+    };
+    if (res.status === 200 && res.arrayBuffer.byteLength > 64) probe.fullBody = res.arrayBuffer;
+    return probe;
+  } catch (e) {
+    console.warn("[A4P Plaud] probeAudioUrl 네트워크 오류", e);
+    return null;
+  }
+}
+
+/** URL 경로 확장자로 MIME 추정 — Blob 재생 시 서버 content-type이 비어 있을 때 사용 */
+export function guessAudioMime(url: string): string | null {
+  let ext = "";
+  try {
+    ext = new URL(url).pathname.split(".").pop()?.toLowerCase() ?? "";
+  } catch {
+    return null;
+  }
+  const table: Record<string, string> = {
+    mp3: "audio/mpeg",
+    opus: "audio/ogg",
+    ogg: "audio/ogg",
+    oga: "audio/ogg",
+    m4a: "audio/mp4",
+    mp4: "audio/mp4",
+    aac: "audio/aac",
+    wav: "audio/wav",
+    webm: "audio/webm",
+    flac: "audio/flac",
+  };
+  return table[ext] ?? null;
 }
 
 interface MultipartField {

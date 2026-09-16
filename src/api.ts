@@ -1,4 +1,5 @@
 import { Notice, requestUrl } from "obsidian";
+import { describeUrl } from "./format";
 import {
   PlaudRecording,
   PlaudRecordingDetail,
@@ -440,8 +441,28 @@ export async function listRecentRecordings(token: PlaudTokenData): Promise<Plaud
   return out;
 }
 
-let loggedDetailSample = false;
+/** id 형식(접두어)별로 상세 raw 샘플을 1회씩 남긴다 — 2026-09 `of_` 접두어 신형식 등장 대응 */
+const loggedDetailSamples = new Set<string>();
+const loggedMp3UrlSamples = new Set<string>();
 let notifiedTranscriptError = false;
+
+/** "of_…" → "of_", 순수 hex → "hex" */
+export function idFormat(id: string): string {
+  const m = /^([a-z]+)_/i.exec(id);
+  return m ? `${m[1].toLowerCase()}_` : "hex";
+}
+
+/** 응답 안의 http(s) 문자열 필드를 경로별로 모은다 (서명 쿼리 제거) — 오디오 URL 대안 필드 탐색용 */
+function collectUrlFields(v: unknown, prefix = "", out: Record<string, string> = {}, depth = 0): Record<string, string> {
+  if (depth > 4 || v === null || typeof v !== "object") return out;
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (typeof val === "string" && /^https?:\/\//.test(val)) out[path] = describeUrl(val);
+    else if (val && typeof val === "object" && !Array.isArray(val)) collectUrlFields(val, path, out, depth + 1);
+    else if (Array.isArray(val) && val.length && typeof val[0] === "object") collectUrlFields(val[0], `${path}[0]`, out, depth + 1);
+  }
+  return out;
+}
 
 /** 파일 상세 원본 — note_list/source_list/presigned_url 포함 (파일 객체 래핑 방어). */
 async function fetchFileDetail(
@@ -449,9 +470,11 @@ async function fetchFileDetail(
   id: string
 ): Promise<Record<string, unknown>> {
   const { json } = await apiGet(token, `/open/third-party/files/${encodeURIComponent(id)}`);
-  if (!loggedDetailSample) {
-    console.log("[A4P Plaud] file detail raw (필드 매핑 확인용)", json);
-    loggedDetailSample = true;
+  const fmt = idFormat(id);
+  if (!loggedDetailSamples.has(fmt)) {
+    console.log(`[A4P Plaud] file detail raw (id 형식: ${fmt}) — 필드 매핑 확인용`, json);
+    console.log(`[A4P Plaud] file detail URL 필드 (id 형식: ${fmt})`, collectUrlFields(json));
+    loggedDetailSamples.add(fmt);
   }
   const o = obj(json);
   return obj(o.file ?? o.data ?? o);
@@ -510,7 +533,7 @@ export async function getRecordingDetail(
 export async function getMp3Url(token: PlaudTokenData, id: string): Promise<string | null> {
   try {
     const o = await fetchFileDetail(token, id);
-    const url = firstString(o, [
+    const keys = [
       "presigned_url",
       "download_url",
       "downloadUrl",
@@ -521,13 +544,30 @@ export async function getMp3Url(token: PlaudTokenData, id: string): Promise<stri
       "file_url",
       "mp3_url",
       "media_url",
-    ]);
-    if (url) return url;
+    ];
+    const logOnce = (key: string, url: string) => {
+      const fmt = idFormat(id);
+      if (loggedMp3UrlSamples.has(fmt)) return;
+      loggedMp3UrlSamples.add(fmt);
+      console.log("[A4P Plaud] 오디오 URL 필드", { idFormat: fmt, key, url: describeUrl(url) });
+    };
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === "string" && v) {
+        logOnce(k, v);
+        return v;
+      }
+    }
     // 중첩 객체 안에 들어있는 경우
     for (const k of ["data", "audio", "media", "file"]) {
       const nested = obj(o[k]);
-      const nestedUrl = firstString(nested, ["presigned_url", "download_url", "url", "audio_url", "temp_url"]);
-      if (nestedUrl) return nestedUrl;
+      for (const nk of ["presigned_url", "download_url", "url", "audio_url", "temp_url"]) {
+        const v = nested[nk];
+        if (typeof v === "string" && v) {
+          logOnce(`${k}.${nk}`, v);
+          return v;
+        }
+      }
     }
     console.warn("[A4P Plaud] 파일 상세에 다운로드 URL 없음", o);
     return null;

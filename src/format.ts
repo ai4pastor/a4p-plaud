@@ -43,3 +43,15 @@ export function formatStartTimeForFilename(epoch: number): string {
   const mi = d.getMinutes().toString().padStart(2, "0");
   return `${yyyy}-${mm}-${dd} ${hh}${mi}`;
 }
+
+/** 로그용 URL 요약 — 서명·토큰이 든 쿼리스트링은 버리고 host와 경로 끝(파일명)만 남긴다 */
+export function describeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const tail = parts.length > 1 ? `…/${parts[parts.length - 1]}` : u.pathname;
+    return `${u.host}/${tail}`;
+  } catch {
+    return url.slice(0, 60);
+  }
+}
