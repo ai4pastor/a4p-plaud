@@ -266,7 +266,6 @@ export class PlaudListView extends ItemView {
     if (!file) return;
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const id = typeof fm?.plaud_id === "string" ? fm.plaud_id : null;
-    console.log("[A4P Plaud] refreshPlayerFromFile", { path: file.path, id });
     // 일반 노트(plaud_id 없음)로 전환 시엔 플레이어를 비우지 않고 그대로 둠.
     if (id) {
       this.setPlayerForId(id);
@@ -283,7 +282,6 @@ export class PlaudListView extends ItemView {
     if (!id) return;
     const sel = `.a4p-plaud-card[data-plaud-id="${CSS.escape(id)}"]`;
     const el = c.querySelector(sel) as HTMLElement | null;
-    console.log("[A4P Plaud] highlightCardForId", { id, found: !!el });
     if (!el) return;
     // 펄스 애니메이션 재시작을 위해 class를 강제로 제거 후 다시 추가
     el.removeClass("a4p-plaud-card-active");

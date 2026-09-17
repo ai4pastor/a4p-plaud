@@ -69,7 +69,7 @@ export default class A4PPlaudPlugin extends Plugin {
   private webReloginPromise: Promise<WebTokenData | null> | null = null;
 
   async onload(): Promise<void> {
-    console.log("A4P Plaud loaded");
+    console.debug("A4P Plaud loaded");
     await this.loadSettings();
     setReauthHandler(() => this.reLogin());
     await this.restoreSession();
@@ -338,7 +338,7 @@ export default class A4PPlaudPlugin extends Plugin {
     closeCallbackServer();
     this.watcher?.stop();
     if (this.autoCheckTimer !== null) window.clearInterval(this.autoCheckTimer);
-    console.log("A4P Plaud unloaded");
+    console.debug("A4P Plaud unloaded");
   }
 
   /** 새 녹음 자동 감지 타이머 설정 (설정 변경 시 settings.ts가 재호출) */

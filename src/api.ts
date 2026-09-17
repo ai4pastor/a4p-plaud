@@ -405,7 +405,7 @@ export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecord
     const { json } = await apiGet(token, `/open/third-party/files/?page=${page}&page_size=100`);
     const batch = asArray(json);
     if (page === 1 && !loggedListSample) {
-      console.log("[A4P Plaud] files page1 개수:", batch.length, "첫 항목 raw:", batch[0]);
+      console.debug("[A4P Plaud] files page1 개수:", batch.length, "첫 항목 raw:", batch[0]);
       loggedListSample = true;
       pageSize = batch.length;
     }
@@ -426,7 +426,7 @@ export async function listRecordings(token: PlaudTokenData): Promise<PlaudRecord
     if (pageSize > 0 && batch.length < pageSize) break;
   }
 
-  console.log(`[A4P Plaud] listRecordings 총 ${recordings.length}개 수집`);
+  console.debug(`[A4P Plaud] listRecordings 총 ${recordings.length}개 수집`);
   return recordings;
 }
 
@@ -472,8 +472,8 @@ async function fetchFileDetail(
   const { json } = await apiGet(token, `/open/third-party/files/${encodeURIComponent(id)}`);
   const fmt = idFormat(id);
   if (!loggedDetailSamples.has(fmt)) {
-    console.log(`[A4P Plaud] file detail raw (id 형식: ${fmt}) — 필드 매핑 확인용`, json);
-    console.log(`[A4P Plaud] file detail URL 필드 (id 형식: ${fmt})`, collectUrlFields(json));
+    console.debug(`[A4P Plaud] file detail raw (id 형식: ${fmt}) — 필드 매핑 확인용`, json);
+    console.debug(`[A4P Plaud] file detail URL 필드 (id 형식: ${fmt})`, collectUrlFields(json));
     loggedDetailSamples.add(fmt);
   }
   const o = obj(json);
@@ -549,7 +549,7 @@ export async function getMp3Url(token: PlaudTokenData, id: string): Promise<stri
       const fmt = idFormat(id);
       if (loggedMp3UrlSamples.has(fmt)) return;
       loggedMp3UrlSamples.add(fmt);
-      console.log("[A4P Plaud] 오디오 URL 필드", { idFormat: fmt, key, url: describeUrl(url) });
+      console.debug("[A4P Plaud] 오디오 URL 필드", { idFormat: fmt, key, url: describeUrl(url) });
     };
     for (const k of keys) {
       const v = o[k];
