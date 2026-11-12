@@ -4,7 +4,7 @@ import { formatDuration, formatStartTime } from "./format";
 import { convertBibleRefsInNote } from "./bible";
 import { getMp3Url } from "./api";
 import { downloadAudio } from "./stt";
-import { extractOggOpus, inspectAudioBytes } from "./plaudaudio";
+import { toPlayableAudio } from "./plaudaudio";
 import { getWebAudioUrl, toWebFileId, WebSession } from "./webapi";
 
 /** 플러그인 소유 본문 구간 마커 — 재동기화 시 이 사이만 교체한다 */
@@ -376,8 +376,8 @@ function extFromUrl(url: string): string {
  * 녹음 오디오를 볼트에 저장한다.
  * - 저장 폴더: settings.audioFolder (비어 있으면 "{importFolder}/audio")
  * - 같은 파일이 이미 있으면(확장자 무관) 재다운로드하지 않는다.
- * - 서버가 mp3를 주면 그대로, 기기 원본(.opus 혼합 컨테이너)이면 Ogg Opus로 재조립해 .ogg로,
- *   재조립이 불가하면 웹 세션이 있을 때 mp3 변환본을 받아 저장한다.
+ * - 서버가 mp3를 주면 그대로, 기기 원본(.opus — 혼합 컨테이너·날 Opus 패킷 스트림)이면 Ogg Opus로 바꿔 .ogg로,
+ *   변환이 불가하면(암호화 등) 웹 세션이 있을 때 mp3 변환본을 받아 저장한다.
  * - 임포트된 노트가 있고 아직 임베드가 없으면 본문 끝에 ![[...]] 추가.
  */
 export async function saveAudioToVault(
@@ -414,16 +414,16 @@ export async function saveAudioToVault(
     const url = await getMp3Url(token, detail.id);
     if (!url) throw new Error("오디오 URL을 받지 못했습니다. (오디오가 없는 녹음일 수 있습니다)");
     const dl = await downloadAudio(url);
-    let data = dl.data;
+    // mp3·Ogg는 그대로, 기기 원본은 혼합 컨테이너 재조립 · 날 Opus 패킷 포장으로 Ogg Opus를 만든다
+    const playable = toPlayableAudio(dl.data);
+    let data = playable.data;
     let ext = extFromUrl(url) || (dl.contentType.includes("mpeg") ? "mp3" : "bin");
-    const info = inspectAudioBytes(data);
-    console.log("[A4P Plaud] 오디오 저장 — 바이트 검사", { id: detail.id, contentType: dl.contentType, ext, ...info });
-    if (ext === "mp3" || dl.contentType.includes("mpeg")) {
+    console.debug("[A4P Plaud] 오디오 저장 — 형식 판별", { id: detail.id, contentType: dl.contentType, ext, kind: playable.kind });
+    if (playable.kind === "mp3" || (playable.kind === "unknown" && (ext === "mp3" || dl.contentType.includes("mpeg")))) {
       ext = "mp3";
       format = "mp3";
-    } else if (info.oggPages > 0 && extractOggOpus(data)) {
-      // 기기 원본 혼합 컨테이너 → 표준 Ogg Opus로 재조립 (옵시디언 임베드 재생 가능)
-      data = (extractOggOpus(data) as { ogg: ArrayBuffer }).ogg;
+    } else if (playable.ext === "ogg") {
+      // 옵시디언 임베드로 재생 가능한 표준 Ogg Opus
       ext = "ogg";
       format = "ogg";
     } else if (webSession) {

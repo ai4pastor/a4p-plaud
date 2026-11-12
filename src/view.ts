@@ -28,12 +28,11 @@ import {
   downloadMp3,
   guessAudioMime,
   probeAudioUrl,
-  sniffAudioHead,
   SttError,
   transcribeAudio,
 } from "./stt";
 import { saveAudioToVault } from "./import";
-import { extractOggOpus, inspectAudioBytes } from "./plaudaudio";
+import { inspectAudioBytes, isDeviceOriginalUrl, sniffAudioHead, toPlayableAudio } from "./plaudaudio";
 import { getWebAudioUrl, toWebFileId } from "./webapi";
 
 /** 세션 동안 plaud_id → STT 결과 캐시 (모달 닫혀도 유지) */
@@ -73,8 +72,9 @@ async function autoSttIfNeeded(
     plugin.setStatusBar(`${statusPrefix} 🎤 오디오 다운로드 중...`);
     const url = await getMp3Url(token, detail.id);
     if (!url) return undefined;
-    const audio = await downloadMp3(url);
-    if (audio.byteLength > STT_MAX_FILE_SIZE[provider] && !plugin.settings.sttAutoFallback) {
+    // 기기 원본(.opus)이면 Ogg로 바꿔 보낸다 — 원본 그대로는 STT 서버가 형식을 읽지 못한다
+    const audio = toPlayableAudio(await downloadMp3(url));
+    if (audio.data.byteLength > STT_MAX_FILE_SIZE[provider] && !plugin.settings.sttAutoFallback) {
       console.warn("[A4P Plaud] 자동 STT 건너뜀 — 파일 크기 초과");
       return undefined;
     }
@@ -86,8 +86,9 @@ async function autoSttIfNeeded(
       groqModel: plugin.settings.sttGroqModel,
       openaiModel: plugin.settings.sttOpenaiModel,
       language: plugin.settings.sttLanguage,
-      audio,
-      filename: `${detail.id}.mp3`,
+      audio: audio.data,
+      filename: `${detail.id}.${audio.ext || "mp3"}`,
+      mime: audio.mime || undefined,
       autoFallback: plugin.settings.sttAutoFallback,
     });
     sttCache.set(detail.id, result);
@@ -457,8 +458,8 @@ export class PlaudListView extends ItemView {
   }
 
   /**
-   * 서버 URL을 새로 받아 <audio>에 물리고 재생한다.
-   * 반환: ok(재생 시작) · load-failed(미디어 로드 실패 — 호출자가 폴백 판단) · other(로그인/URL 없음/중단 등)
+   * 서버 URL을 새로 받아 <audio>에 물리고 재생한다. 기기 원본(.opus)이면 스트리밍 없이 바로 변환 경로로 간다.
+   * 반환: ok(재생 시작) · load-failed(미디어 로드 실패 — 호출자가 폴백 판단) · other(로그인/URL 없음/중단, 변환 경로가 끝까지 처리함 등)
    */
   private async loadAndPlay(id: string, resumeAt: number): Promise<"ok" | "load-failed" | "other"> {
     const token = this.plugin.getToken();
@@ -479,6 +480,18 @@ export class PlaudListView extends ItemView {
       this.revokeBlobUrl();
       this.fallbackStage = "none";
       this.currentAudioUrl = url;
+      if (isDeviceOriginalUrl(url)) {
+        // 기기 원본(.opus)은 스트리밍으로 열리지 않는다 — 바로 내려받아 재생 가능한 형식으로 바꾼다.
+        // 변환 중 생기는 error 이벤트는 무시하고 diagnoseAndFallback이 마지막 단계까지 정한다.
+        const prev = this.handlingAudioError;
+        this.handlingAudioError = true;
+        try {
+          await this.diagnoseAndFallback(id, url, resumeAt);
+        } finally {
+          this.handlingAudioError = prev;
+        }
+        return "other";
+      }
       this.audioEl.src = url;
       this.seekOnceWhenReady(resumeAt);
       await this.audioEl.play();
@@ -543,6 +556,10 @@ export class PlaudListView extends ItemView {
     }
   }
 
+  /**
+   * 오디오 URL을 프로브해 원인을 가르고, 받을 수 있으면 전체를 내려받아 재생 가능한 형식으로 바꿔 Blob으로 재생한다.
+   * 기기 원본(.opus)은 loadAndPlay에서 처음부터 이 경로로 온다 — 평상시 경로이므로 진행 로그는 debug.
+   */
   private async diagnoseAndFallback(id: string, url: string | null, resumeAt: number): Promise<void> {
     const audio = this.audioEl;
     const btn = this.playButton;
@@ -552,10 +569,12 @@ export class PlaudListView extends ItemView {
       if (btn) btn.setText("▶ 재생");
       return;
     }
-    if (btn) btn.setText("진단 중...");
+    const original = isDeviceOriginalUrl(url);
+    const trace = original ? console.debug : console.warn;
+    if (btn) btn.setText(original ? "원본 확인 중..." : "진단 중...");
     const probe = await probeAudioUrl(url);
     this.lastProbe = probe;
-    console.warn("[A4P Plaud] 오디오 URL 프로브", {
+    trace("[A4P Plaud] 오디오 URL 프로브", {
       id,
       idFormat: idFormat(id),
       url: describeUrl(url),
@@ -580,16 +599,17 @@ export class PlaudListView extends ItemView {
 
     // 파일 머리로 컨테이너 판별 — 암호화된 기기 원본(PLAUD.AI)은 내려받아도 못 풀므로 바로 mp3 변환본으로
     const kind = sniffAudioHead(probe.head);
-    console.log("[A4P Plaud] 오디오 컨테이너 판별", { id, kind, head: Array.from(probe.head.subarray(0, 16), (x) => x.toString(16).padStart(2, "0")).join(" ") });
+    const headHex = Array.from(probe.head.subarray(0, 16), (x) => x.toString(16).padStart(2, "0")).join(" ");
+    console.debug("[A4P Plaud] 오디오 컨테이너 판별", { id, kind, head: headHex });
     if (kind === "plaud-encrypted") {
       await this.tryWebMp3(id, resumeAt, "Plaud 기기 원본(암호화 컨테이너)은 브라우저가 재생할 수 없습니다");
       return;
     }
 
-    // 서버는 정상인데 브라우저 스트리밍만 막힌 경우 → 전체 수신 후 Blob으로 재생
+    // 전체를 내려받아 재생 가능한 형식으로 맞춘 뒤 Blob으로 재생 — 기기 원본 변환, 또는 스트리밍만 실패한 경우
     const mb = probe.contentLength ? ` (${(probe.contentLength / 1048576).toFixed(1)} MB)` : "";
-    if (btn) btn.setText(`다운로드 후 재생${mb}...`);
-    new Notice(`스트리밍이 막혀 오디오 전체를 내려받은 뒤 재생합니다${mb}`);
+    if (btn) btn.setText(original ? `원본 변환 중${mb}...` : `다운로드 후 재생${mb}...`);
+    if (!original) new Notice(`스트리밍 재생이 되지 않아 오디오 전체를 내려받아 재생합니다${mb}`);
     try {
       let data: ArrayBuffer;
       let contentType = probe.contentType;
@@ -600,32 +620,22 @@ export class PlaudListView extends ItemView {
         data = dl.data;
         contentType = dl.contentType || contentType;
       }
-      let type = contentType.startsWith("audio/") ? contentType : guessAudioMime(url) ?? "audio/mpeg";
-      // Plaud 기기 원본(.opus 혼합 컨테이너)이면 Ogg 페이지만 골라 표준 Ogg Opus로 재조립
-      const info = inspectAudioBytes(data);
-      console.log("[A4P Plaud] 오디오 바이트 검사", { id, contentType, ...info });
-      if (info.oggPages > 0) {
-        const ex = extractOggOpus(data);
-        if (ex && !ex.alreadyClean) {
-          console.log("[A4P Plaud] Ogg Opus 재조립", {
-            keptPages: ex.keptPages,
-            droppedPages: ex.droppedPages,
-            junkBytes: ex.junkBytes,
-            bytes: ex.ogg.byteLength,
-          });
-          data = ex.ogg;
-          type = "audio/ogg";
-        } else if (ex) {
-          type = "audio/ogg";
-        }
+      // mp3·Ogg는 그대로, 혼합 컨테이너는 재조립, 날 Opus 패킷 스트림은 Ogg로 포장
+      const playable = toPlayableAudio(data);
+      console.debug("[A4P Plaud] 오디오 형식 변환", { id, contentType, kind: playable.kind, bytes: data.byteLength, raw: playable.raw });
+      if (playable.kind === "encrypted" || (original && playable.kind === "unknown")) {
+        console.warn("[A4P Plaud] 기기 원본을 변환하지 못함", { id, idFormat: idFormat(id), kind: playable.kind, ...inspectAudioBytes(data) });
+        await this.tryWebMp3(id, resumeAt, "이 녹음의 기기 원본 형식은 플러그인이 변환할 수 없습니다");
+        return;
       }
+      const type = playable.mime || (contentType.startsWith("audio/") ? contentType : guessAudioMime(url) ?? "audio/mpeg");
       this.revokeBlobUrl();
       this.fallbackStage = "blob";
-      this.blobUrl = URL.createObjectURL(new Blob([data], { type }));
+      this.blobUrl = URL.createObjectURL(new Blob([playable.data], { type }));
       audio.src = this.blobUrl;
       this.seekOnceWhenReady(resumeAt);
       await audio.play();
-      console.log("[A4P Plaud] 폴백 재생 시작", { id, type, bytes: data.byteLength });
+      console.debug("[A4P Plaud] Blob 재생 시작", { id, type, bytes: playable.data.byteLength });
     } catch (e) {
       const err = e as Error;
       if (err?.name === "AbortError") return;
@@ -1416,8 +1426,9 @@ class PlaudDetailModal extends Modal {
       const url = await getMp3Url(token, detail.id);
       if (!url) throw new SttError("DOWNLOAD_FAILED", "mp3 URL을 받지 못했습니다.");
 
-      setStatus("🎤 mp3 다운로드 중...");
-      const audio = await downloadMp3(url);
+      setStatus("🎤 오디오 다운로드 중...");
+      // 기기 원본(.opus)이면 Ogg로 바꿔 보낸다 — 원본 그대로는 STT 서버가 형식을 읽지 못한다
+      const audio = toPlayableAudio(await downloadMp3(url));
 
       setStatus("🎤 STT 서버에 업로드 + 전사 중...");
       const result = await transcribeAudio({
@@ -1427,8 +1438,9 @@ class PlaudDetailModal extends Modal {
         groqModel: this.plugin.settings.sttGroqModel,
         openaiModel: this.plugin.settings.sttOpenaiModel,
         language: this.plugin.settings.sttLanguage,
-        audio,
-        filename: `${detail.id}.mp3`,
+        audio: audio.data,
+        filename: `${detail.id}.${audio.ext || "mp3"}`,
+        mime: audio.mime || undefined,
         autoFallback: this.plugin.settings.sttAutoFallback,
       });
 

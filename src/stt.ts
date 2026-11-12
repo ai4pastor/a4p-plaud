@@ -72,15 +72,6 @@ export interface AudioProbe {
   head: Uint8Array;
 }
 
-/** 파일 머리로 컨테이너 판별 */
-export function sniffAudioHead(head: Uint8Array): "ogg" | "plaud-encrypted" | "mp3" | "unknown" {
-  const ascii = (n: number) => String.fromCharCode(...Array.from(head.subarray(0, n)));
-  if (head.length >= 4 && ascii(4) === "OggS") return "ogg";
-  if (head.length >= 8 && ascii(8) === "PLAUD.AI") return "plaud-encrypted";
-  if (head.length >= 3 && (ascii(3) === "ID3" || (head[0] === 0xff && (head[1] & 0xe0) === 0xe0))) return "mp3";
-  return "unknown";
-}
-
 /**
  * 오디오 URL이 살아 있는지 Node 측으로 확인 — HTTP 상태·Content-Type·길이를 회수한다.
  * <audio>가 "no supported source"로 실패했을 때 서버 거부(4xx)인지 형식 문제인지 가르는 용도.
@@ -145,7 +136,8 @@ interface MultipartField {
 function buildMultipart(
   audio: ArrayBuffer,
   filename: string,
-  fields: MultipartField[]
+  fields: MultipartField[],
+  mime = "audio/mpeg"
 ): { body: ArrayBuffer; contentType: string } {
   const boundary = `----A4PPlaudBoundary${Math.random().toString(16).slice(2)}`;
   const enc = new TextEncoder();
@@ -163,7 +155,7 @@ function buildMultipart(
   // 파일 헤더
   parts.push(
     enc.encode(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: audio/mpeg\r\n\r\n`
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`
     )
   );
   // 파일 바이너리
@@ -202,6 +194,8 @@ interface CallOptions {
   apiKey: string;
   audio: ArrayBuffer;
   filename?: string;
+  /** 업로드 파일 MIME (기본 audio/mpeg) */
+  mime?: string;
   model: string;
   language?: string;
   onProgress?: ProgressCallback;
@@ -232,7 +226,8 @@ async function callWhisperApi(
   const { body, contentType } = buildMultipart(
     opts.audio,
     opts.filename ?? "audio.mp3",
-    fields
+    fields,
+    opts.mime
   );
 
   opts.onProgress?.("upload", { total: body.byteLength });
@@ -274,6 +269,8 @@ export interface TranscribeArgs {
   language: string;
   audio: ArrayBuffer;
   filename?: string;
+  /** 업로드 파일 MIME (기본 audio/mpeg) — 기기 원본을 Ogg로 바꿨으면 audio/ogg */
+  mime?: string;
   /** 디폴트 공급자 실패 시 다른 공급자로 자동 재시도 */
   autoFallback: boolean;
   onProgress?: ProgressCallback;
@@ -289,6 +286,7 @@ async function callProvider(
       apiKey: args.groqKey ?? "",
       audio: args.audio,
       filename: args.filename,
+      mime: args.mime,
       model,
       language: args.language || undefined,
       onProgress: args.onProgress,
@@ -300,6 +298,7 @@ async function callProvider(
     apiKey: args.openaiKey ?? "",
     audio: args.audio,
     filename: args.filename,
+    mime: args.mime,
     model,
     language: args.language || undefined,
     onProgress: args.onProgress,
